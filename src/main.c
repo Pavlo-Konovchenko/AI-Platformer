@@ -103,9 +103,8 @@ static void BuildLevel(void)
     // pit: 520 - 660
     AddSolid(660, 650, 380, 100, SOLID_GROUND);
 
-    // --- Section 2: low wall to jump over, then spikes on the ground ---
-    AddSolid(1040, 460, 40, 290, SOLID_WALL);
-    AddSolid(1080, 650, 320, 100, SOLID_GROUND);
+    // --- Section 2: spikes on the ground ---
+    AddSolid(1040, 650, 360, 100, SOLID_GROUND);
     AddSpike(1180, 630, 100, 20);
 
     // --- Section 3: wide pit needing a grapple swing ---
@@ -285,54 +284,68 @@ static Vector2 PlayerCenter(Player* p)
     return (Vector2) { p->position.x + PLAYER_W * 0.5f, p->position.y + PLAYER_H * 0.5f };
 }
 
-// Casts a ray from origin along the unit vector dir and returns the distance
-// to the nearest solid it hits, capped at maxDist (returned if nothing is
-// hit). Uses the standard slab method for ray-vs-AABB intersection. This is
-// what stops the grapple rope from reeling the player straight through a
-// wall that sits between the anchor and them: no matter how much the rope
-// wants to shorten, it can't get shorter than the distance to that wall.
-static float RaycastSolids(Vector2 origin, Vector2 dir, float maxDist)
+// Standard slab-method test for whether the segment from origin, going
+// maxDist along the unit vector dir, intersects rectangle r.
+static bool SegmentHitsRect(Vector2 origin, Vector2 dir, float maxDist, Rectangle r)
 {
-    float nearest = maxDist;
+    float tmin = 0.0f;
+    float tmax = maxDist;
+
+    if (fabsf(dir.x) < 1e-6f)
+    {
+        if (origin.x < r.x || origin.x > r.x + r.width) return false;
+    }
+    else
+    {
+        float t1 = (r.x - origin.x) / dir.x;
+        float t2 = (r.x + r.width - origin.x) / dir.x;
+        if (t1 > t2) { float tmp = t1; t1 = t2; t2 = tmp; }
+        if (t1 > tmin) tmin = t1;
+        if (t2 < tmax) tmax = t2;
+        if (tmin > tmax) return false;
+    }
+
+    if (fabsf(dir.y) < 1e-6f)
+    {
+        if (origin.y < r.y || origin.y > r.y + r.height) return false;
+    }
+    else
+    {
+        float t1 = (r.y - origin.y) / dir.y;
+        float t2 = (r.y + r.height - origin.y) / dir.y;
+        if (t1 > t2) { float tmp = t1; t1 = t2; t2 = tmp; }
+        if (t1 > tmin) tmin = t1;
+        if (t2 < tmax) tmax = t2;
+        if (tmin > tmax) return false;
+    }
+
+    return true;
+}
+
+// The rope is only allowed to refuse shortening when a wall is genuinely
+// in the way of the player right now: it crosses the line from the anchor
+// to the player, AND the player's body is actually touching that same
+// wall. A slightly inflated player rect catches the case where they're
+// flush against it (MoveAndCollide stops them exactly at the surface,
+// not overlapping it).
+static bool ReelBlockedByWall(Player* p)
+{
+    Vector2 center = PlayerCenter(p);
+    Vector2 diff = Vector2Subtract(center, p->grappleAnchor);
+    float dist = Vector2Length(diff);
+    if (dist < 0.0001f) return false;
+    Vector2 dir = Vector2Scale(diff, 1.0f / dist);
+
+    Rectangle pr = PlayerRect(p->position);
+    Rectangle touchRect = (Rectangle){ pr.x - 1, pr.y - 1, pr.width + 2, pr.height + 2 };
+
     for (int i = 0; i < solidCount; i++)
     {
-        Rectangle r = solids[i].rect;
-        float tmin = 0.0f;
-        float tmax = nearest;
-
-        if (fabsf(dir.x) < 1e-6f)
-        {
-            if (origin.x < r.x || origin.x > r.x + r.width) continue;
-        }
-        else
-        {
-            float t1 = (r.x - origin.x) / dir.x;
-            float t2 = (r.x + r.width - origin.x) / dir.x;
-            if (t1 > t2) { float tmp = t1; t1 = t2; t2 = tmp; }
-            if (t1 > tmin) tmin = t1;
-            if (t2 < tmax) tmax = t2;
-            if (tmin > tmax) continue;
-        }
-
-        if (fabsf(dir.y) < 1e-6f)
-        {
-            if (origin.y < r.y || origin.y > r.y + r.height) continue;
-        }
-        else
-        {
-            float t1 = (r.y - origin.y) / dir.y;
-            float t2 = (r.y + r.height - origin.y) / dir.y;
-            if (t1 > t2) { float tmp = t1; t1 = t2; t2 = tmp; }
-            if (t1 > tmin) tmin = t1;
-            if (t2 < tmax) tmax = t2;
-            if (tmin > tmax) continue;
-        }
-
-        // Small epsilon so a solid the ray starts exactly touching doesn't
-        // clamp the rope to ~0.
-        if (tmin > 0.0001f && tmin < nearest) nearest = tmin;
+        if (solids[i].type != SOLID_WALL) continue;
+        if (!SegmentHitsRect(p->grappleAnchor, dir, dist, solids[i].rect)) continue;
+        if (CheckCollisionRecs(touchRect, solids[i].rect)) return true;
     }
-    return nearest;
+    return false;
 }
 
 static void TryFireGrapple(Player* p)
@@ -362,8 +375,10 @@ static void UpdateGrapple(Player* p, float dt)
 {
     if (!p->grappling) return;
 
-    // Reel in / out
-    if (IsKeyDown(KEY_UP) || IsKeyDown(KEY_W))
+    // Reel in / out. Shortening is refused while a wall sits between the
+    // anchor and the player and the player is touching it; lengthening is
+    // always allowed.
+    if ((IsKeyDown(KEY_UP) || IsKeyDown(KEY_W)) && !ReelBlockedByWall(p))
     {
         p->ropeLength -= GRAPPLE_REEL_SPD * dt;
         if (p->ropeLength < GRAPPLE_MIN_LEN) p->ropeLength = GRAPPLE_MIN_LEN;
@@ -382,23 +397,11 @@ static void UpdateGrapple(Player* p, float dt)
     {
         Vector2 dir = Vector2Scale(diff, 1.0f / dist);
 
-        // The rope can't reel any shorter than the distance to whatever
-        // solid stands between the anchor and the player -- otherwise
-        // holding reel-in (or even just a taut swing) would keep recomputing
-        // a target point past the obstruction, walking the player through
-        // it a few pixels a frame even though ResolveSolidOverlap pushes
-        // them back out afterward each time.
-        float wallDist = RaycastSolids(p->grappleAnchor, dir, dist);
-        if (wallDist < p->ropeLength) p->ropeLength = wallDist;
-
         // Snap back onto the rope circle
         Vector2 newCenter = Vector2Add(p->grappleAnchor, Vector2Scale(dir, p->ropeLength));
         p->position.x = newCenter.x - PLAYER_W * 0.5f;
         p->position.y = newCenter.y - PLAYER_H * 0.5f;
 
-        // The raycast above is a single point and doesn't know the player's
-        // width/height, so it can still leave the body edge-on into a wall;
-        // push back out and apply wall-bounce as a final cleanup.
         ResolveSolidOverlap(p);
 
         // Remove outward radial velocity (rope is taut, not a spring)
