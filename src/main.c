@@ -47,6 +47,17 @@
 #define MAX_COINS   32
 #define MAX_PARTICLES 300
 
+//------------------------------------------------------------------------------------
+// Speed-feel / visual filters
+//------------------------------------------------------------------------------------
+#define MPH_SCALE            12.0f    // world units/sec -> "MPH" display scale
+#define CAMERA_LEAD_FACTOR   0.35f    // how much camera leads in movement direction
+#define CAMERA_LAG_SPEED     6.0f     // how quickly camera catches up
+#define SPEED_BLUR_MIN       300.0f   // speed at which effects start
+#define SPEED_BLUR_MAX       900.0f   // speed at which effects are maxed
+#define MOTION_TRAIL_COUNT   6
+#define MAX_STREAKS          80
+
 typedef enum { SOLID_GROUND, SOLID_FLOATING, SOLID_WALL } SolidType;
 
 typedef struct {
@@ -84,6 +95,35 @@ typedef struct {
     bool collected;
     float bob; // animation phase
 } Coin;
+
+// Speed visual effects
+typedef struct {
+    Vector2 pos;
+    float life, maxLife;
+    float speed;
+    Color color;
+    bool alive;
+} SpeedStreak;
+
+static SpeedStreak streaks[MAX_STREAKS];
+
+// Motion trail for player
+typedef struct {
+    Vector2 pos;
+    float life;
+    Vector2 scale;
+    float facing;
+    bool grappling;
+} TrailGhost;
+
+static TrailGhost trailGhosts[MOTION_TRAIL_COUNT];
+static float trailTimer = 0.0f;
+
+// Camera smoothing
+static Vector2 cameraSmooth = { 0 };
+static Vector2 cameraVel = { 0 };
+static float speedIntensity = 0.0f;  // 0..1 normalized speed factor
+static float displaySpeed = 0.0f;    // smoothed speed for MPH display
 
 static Solid   solids[MAX_SOLIDS];
 static int     solidCount = 0;
@@ -170,7 +210,7 @@ static void SpawnBurst(Vector2 pos, int count, float speed, float life, float si
         float a = ((float)GetRandomValue(0, 360)) * DEG2RAD;
         float s = speed * (0.4f + 0.6f * (GetRandomValue(0, 100) / 100.0f));
         Vector2 v = { cosf(a) * s, sinf(a) * s - speed * 0.3f };
-        SpawnParticle(pos, v, life * (0.6f + 0.4f * (GetRandomValue(0,100)/100.0f)), size, color);
+        SpawnParticle(pos, v, life * (0.6f + 0.4f * (GetRandomValue(0, 100) / 100.0f)), size, color);
     }
 }
 
@@ -212,7 +252,7 @@ static Sound MakeTone(float freq, float duration, float freqSlide, bool square)
     int sampleRate = 44100;
     int frameCount = (int)(duration * sampleRate);
     if (frameCount < 1) frameCount = 1;
-    short *data = (short *)malloc(sizeof(short) * frameCount);
+    short* data = (short*)malloc(sizeof(short) * frameCount);
 
     for (int i = 0; i < frameCount; i++)
     {
@@ -243,14 +283,14 @@ static void InitGameAudio(void)
     audioReady = IsAudioDeviceReady();
     if (!audioReady) return;
 
-    sndJump       = MakeTone(420.0f, 0.12f,  260.0f, true);
-    sndDoubleJump = MakeTone(560.0f, 0.14f,  420.0f, true);
-    sndLand       = MakeTone(140.0f, 0.08f, -60.0f,  true);
-    sndGrapple    = MakeTone(700.0f, 0.10f,  180.0f, true);
-    sndWallBounce = MakeTone(260.0f, 0.10f,  120.0f, true);
-    sndCoin       = MakeTone(900.0f, 0.14f,  700.0f, false);
-    sndWin        = MakeTone(600.0f, 0.55f,  500.0f, false);
-    sndDeath      = MakeTone(300.0f, 0.30f, -220.0f, true);
+    sndJump = MakeTone(420.0f, 0.12f, 260.0f, true);
+    sndDoubleJump = MakeTone(560.0f, 0.14f, 420.0f, true);
+    sndLand = MakeTone(140.0f, 0.08f, -60.0f, true);
+    sndGrapple = MakeTone(700.0f, 0.10f, 180.0f, true);
+    sndWallBounce = MakeTone(260.0f, 0.10f, 120.0f, true);
+    sndCoin = MakeTone(900.0f, 0.14f, 700.0f, false);
+    sndWin = MakeTone(600.0f, 0.55f, 500.0f, false);
+    sndDeath = MakeTone(300.0f, 0.30f, -220.0f, true);
 }
 
 static void ShutdownGameAudio(void)
@@ -281,10 +321,10 @@ static void BuildLevel(void)
     solidCount = spikeCount = anchorCount = coinCount = 0;
 
     // --- Section 1: start, simple gap ---
-    AddSolid(   0, 650, 520, 100, SOLID_GROUND);
+    AddSolid(0, 650, 520, 100, SOLID_GROUND);
     AddCoin(260, 580);
     // pit: 520 - 660
-    AddSolid( 660, 650, 380, 100, SOLID_GROUND);
+    AddSolid(660, 650, 380, 100, SOLID_GROUND);
     AddCoin(840, 580);
 
     // --- Section 2: low wall to jump over, then spikes on the ground ---
@@ -364,15 +404,15 @@ static void BuildLevel(void)
 //------------------------------------------------------------------------------------
 static Rectangle PlayerRect(Vector2 pos)
 {
-    return (Rectangle){ pos.x, pos.y, PLAYER_W, PLAYER_H };
+    return (Rectangle) { pos.x, pos.y, PLAYER_W, PLAYER_H };
 }
 
-static Vector2 PlayerCenter(Player *p)
+static Vector2 PlayerCenter(Player* p)
 {
-    return (Vector2){ p->position.x + PLAYER_W * 0.5f, p->position.y + PLAYER_H * 0.5f };
+    return (Vector2) { p->position.x + PLAYER_W * 0.5f, p->position.y + PLAYER_H * 0.5f };
 }
 
-static void MoveAndCollide(Player *p, float dt)
+static void MoveAndCollide(Player* p, float dt)
 {
     bool wasOnGround = p->onGround;
 
@@ -391,7 +431,7 @@ static void MoveAndCollide(Player *p, float dt)
                 p->velocity.x = -p->velocity.x * WALL_BOUNCE_RESTITUTION;
                 Snd(sndWallBounce);
                 Shake(6.0f, 0.15f);
-                SpawnBurst(PlayerCenter(p), 10, 220.0f, 0.35f, 4.0f, (Color){ 230, 230, 240, 255 });
+                SpawnBurst(PlayerCenter(p), 10, 220.0f, 0.35f, 4.0f, (Color) { 230, 230, 240, 255 });
             }
             else
             {
@@ -430,7 +470,7 @@ static void MoveAndCollide(Player *p, float dt)
         Snd(sndLand);
         Shake(3.0f, 0.08f);
         Vector2 feet = { p->position.x + PLAYER_W * 0.5f, p->position.y + PLAYER_H };
-        SpawnBurst(feet, 8, 140.0f, 0.4f, 3.5f, (Color){ 210, 200, 170, 255 });
+        SpawnBurst(feet, 8, 140.0f, 0.4f, 3.5f, (Color) { 210, 200, 170, 255 });
         p->usedDoubleJump = false;
         p->coyoteTimer = 0.0f;
     }
@@ -439,7 +479,7 @@ static void MoveAndCollide(Player *p, float dt)
 // The grapple constraint repositions the player directly, which can leave
 // the body edge-on into a wall the rope circle happened to pass through.
 // This pushes the player back out along the shallowest overlap axis.
-static void ResolveSolidOverlap(Player *p)
+static void ResolveSolidOverlap(Player* p)
 {
     Rectangle pr = PlayerRect(p->position);
     for (int i = 0; i < solidCount; i++)
@@ -473,7 +513,7 @@ static void ResolveSolidOverlap(Player *p)
     }
 }
 
-static bool TouchesAnySpike(Player *p)
+static bool TouchesAnySpike(Player* p)
 {
     Rectangle pr = PlayerRect(p->position);
     for (int i = 0; i < spikeCount; i++)
@@ -481,7 +521,7 @@ static bool TouchesAnySpike(Player *p)
     return false;
 }
 
-static void CheckCoins(Player *p)
+static void CheckCoins(Player* p)
 {
     Rectangle pr = PlayerRect(p->position);
     for (int i = 0; i < coinCount; i++)
@@ -493,12 +533,12 @@ static void CheckCoins(Player *p)
             coins[i].collected = true;
             coinsCollected++;
             Snd(sndCoin);
-            SpawnBurst(coins[i].pos, 12, 180.0f, 0.5f, 3.0f, (Color){ 255, 215, 60, 255 });
+            SpawnBurst(coins[i].pos, 12, 180.0f, 0.5f, 3.0f, (Color) { 255, 215, 60, 255 });
         }
     }
 }
 
-static void RespawnPlayer(Player *p)
+static void RespawnPlayer(Player* p)
 {
     p->position = spawnPoint;
     p->velocity = (Vector2){ 0, 0 };
@@ -560,7 +600,7 @@ static float RaycastSolids(Vector2 origin, Vector2 dir, float maxDist)
     return nearest;
 }
 
-static void TryFireGrapple(Player *p)
+static void TryFireGrapple(Player* p)
 {
     Vector2 center = PlayerCenter(p);
     int best = -1;
@@ -582,11 +622,11 @@ static void TryFireGrapple(Player *p)
         if (p->ropeLength < GRAPPLE_MIN_LEN) p->ropeLength = GRAPPLE_MIN_LEN;
         p->usedDoubleJump = false; // grappling refreshes the double jump for extra chaining fun
         Snd(sndGrapple);
-        SpawnBurst(anchors[best], 10, 160.0f, 0.4f, 3.0f, (Color){ 250, 210, 60, 255 });
+        SpawnBurst(anchors[best], 10, 160.0f, 0.4f, 3.0f, (Color) { 250, 210, 60, 255 });
     }
 }
 
-static void UpdateGrapple(Player *p, float dt)
+static void UpdateGrapple(Player* p, float dt)
 {
     if (!p->grappling) return;
 
@@ -636,17 +676,216 @@ static void UpdateGrapple(Player *p, float dt)
     {
         float t = (float)GetRandomValue(20, 80) / 100.0f;
         Vector2 pt = Vector2Lerp(center, p->grappleAnchor, t);
-        SpawnParticle(pt, (Vector2){ 0, -20 }, 0.25f, 2.0f, (Color){ 255, 240, 180, 200 });
+        SpawnParticle(pt, (Vector2) { 0, -20 }, 0.25f, 2.0f, (Color) { 255, 240, 180, 200 });
     }
 }
 
 //------------------------------------------------------------------------------------
 // Drawing
 //------------------------------------------------------------------------------------
+//------------------------------------------------------------------------------------
+// Speed effects
+//------------------------------------------------------------------------------------
+static void UpdateSpeedStreaks(float dt)
+{
+    for (int i = 0; i < MAX_STREAKS; i++)
+    {
+        if (!streaks[i].alive) continue;
+        streaks[i].life -= dt;
+        if (streaks[i].life <= 0.0f) { streaks[i].alive = false; continue; }
+        // Streaks move opposite to player velocity, in screen space
+        streaks[i].pos.x -= streaks[i].speed * 0.02f * (streaks[i].color.r > 200 ? 1.0f : -1.0f);
+    }
+}
+
+static void SpawnSpeedStreak(Vector2 playerVel, Vector2 screenCenter)
+{
+    if (speedIntensity < 0.15f) return;
+
+    for (int i = 0; i < MAX_STREAKS; i++)
+    {
+        if (streaks[i].alive) continue;
+
+        // Spawn at edges of screen, biased perpendicular to motion
+        float angle = atan2f(-playerVel.y, -playerVel.x);
+        float spread = (GetRandomValue(0, 100) / 100.0f - 0.5f) * 2.0f;
+        float perpAngle = angle + PI * 0.5f + spread * 0.8f;
+
+        // Distance from center scaled by how fast we're going
+        float dist = 300.0f + (float)GetRandomValue(0, 200);
+
+        streaks[i].pos.x = screenCenter.x + cosf(perpAngle) * dist + (float)GetRandomValue(-100, 100);
+        streaks[i].pos.y = screenCenter.y + sinf(perpAngle) * dist + (float)GetRandomValue(-100, 100);
+        streaks[i].speed = 400.0f + speedIntensity * 800.0f;
+        streaks[i].maxLife = 0.15f + speedIntensity * 0.2f;
+        streaks[i].life = streaks[i].maxLife;
+        streaks[i].alive = true;
+
+        unsigned char alpha = (unsigned char)(80 + speedIntensity * 175);
+        streaks[i].color = (Color){ 255, 255, 255, alpha };
+        return;
+    }
+}
+
+static void DrawSpeedStreaks(Camera2D camera)
+{
+    Vector2 screenCenter = { SCREEN_W / 2.0f, SCREEN_H / 2.0f };
+    Vector2 playerVel = { 0, 0 }; // will be set externally
+
+    for (int i = 0; i < MAX_STREAKS; i++)
+    {
+        if (!streaks[i].alive) continue;
+        float t = streaks[i].life / streaks[i].maxLife;
+
+        // Draw as horizontal-ish streak
+        float length = 20.0f + speedIntensity * 80.0f;
+        Color c = streaks[i].color;
+        c.a = (unsigned char)(c.a * t);
+
+        DrawLineEx(
+            streaks[i].pos,
+            (Vector2) {
+            streaks[i].pos.x + length, streaks[i].pos.y
+        },
+            1.5f + speedIntensity * 1.5f,
+            c
+        );
+    }
+}
+
+// Radial speed lines emanating from screen edges when going fast
+static void DrawRadialSpeedLines(Vector2 playerVel, float intensity)
+{
+    if (intensity < 0.05f) return;
+
+    Vector2 center = { SCREEN_W / 2.0f, SCREEN_H / 2.0f };
+
+    // Direction of movement determines which side lines come from
+    float moveAngle = atan2f(playerVel.y, playerVel.x);
+
+    int numLines = (int)(30 * intensity);
+    for (int i = 0; i < numLines; i++)
+    {
+        float a = moveAngle + PI + ((float)GetRandomValue(-100, 100) / 100.0f) * 0.9f;
+        float edgeDist = 380.0f + (float)GetRandomValue(0, 180);
+        float len = 40.0f + intensity * 120.0f;
+
+        float sx = center.x + cosf(a) * edgeDist;
+        float sy = center.y + sinf(a) * edgeDist;
+
+        unsigned char alpha = (unsigned char)(30 + intensity * 90);
+        Color c = (Color){ 255, 255, 255, alpha };
+
+        DrawLineEx(
+            (Vector2) {
+            sx, sy
+        },
+            (Vector2) {
+            sx - cosf(a) * len, sy - sinf(a) * len
+        },
+            1.0f + intensity * 2.0f,
+            c
+        );
+    }
+}
+
+// Vignette that intensifies with speed
+static void DrawSpeedVignette(float intensity)
+{
+    if (intensity < 0.1f) return;
+
+    unsigned char alpha = (unsigned char)(intensity * 120);
+    Color c = (Color){ 20, 10, 40, alpha };
+
+    // Draw gradient rectangles at edges
+    int bandSize = (int)(60 + intensity * 120);
+    for (int i = 0; i < bandSize; i++)
+    {
+        float t = 1.0f - (float)i / bandSize;
+        unsigned char a = (unsigned char)(alpha * t * t);
+        Color cc = { c.r, c.g, c.b, a };
+
+        DrawRectangle(0, i, SCREEN_W, 1, cc);
+        DrawRectangle(0, SCREEN_H - i - 1, SCREEN_W, 1, cc);
+        DrawRectangle(i, 0, 1, SCREEN_H, cc);
+        DrawRectangle(SCREEN_W - i - 1, 0, 1, SCREEN_H, cc);
+    }
+}
+
+// Chromatic aberration effect - draws red/blue offset copies at edges
+static void DrawChromaticAberration(float intensity)
+{
+    if (intensity < 0.2f) return;
+
+    float offset = intensity * 6.0f;
+    unsigned char alpha = (unsigned char)(intensity * 70);
+
+    // Simple edge tinting to fake chromatic aberration
+    Color redTint = { 255, 0, 0, alpha };
+    Color blueTint = { 0, 80, 255, alpha };
+
+    // Red on left edge, blue on right (or based on movement)
+    DrawRectangle(0, 0, (int)(offset * 3), SCREEN_H, redTint);
+    DrawRectangle(SCREEN_W - (int)(offset * 3), 0, (int)(offset * 3), SCREEN_H, blueTint);
+}
+
+// Motion trail ghosts
+static void UpdateTrailGhosts(Player* p, float dt)
+{
+    for (int i = 0; i < MOTION_TRAIL_COUNT; i++)
+    {
+        if (trailGhosts[i].life > 0.0f)
+            trailGhosts[i].life -= dt * 4.0f;
+    }
+
+    float speed = Vector2Length(p->velocity);
+    if (speed > SPEED_BLUR_MIN)
+    {
+        trailTimer -= dt;
+        if (trailTimer <= 0.0f)
+        {
+            trailTimer = 0.03f;
+
+            // Shift ghosts down
+            for (int i = MOTION_TRAIL_COUNT - 1; i > 0; i--)
+                trailGhosts[i] = trailGhosts[i - 1];
+
+            trailGhosts[0].pos = p->position;
+            trailGhosts[0].life = 1.0f;
+            trailGhosts[0].scale = p->scale;
+            trailGhosts[0].facing = p->facing;
+            trailGhosts[0].grappling = p->grappling;
+        }
+    }
+}
+
+static void DrawTrailGhosts(void)
+{
+    for (int i = MOTION_TRAIL_COUNT - 1; i >= 0; i--)
+    {
+        if (trailGhosts[i].life <= 0.0f) continue;
+
+        float t = trailGhosts[i].life;
+        float w = PLAYER_W * trailGhosts[i].scale.x;
+        float h = PLAYER_H * trailGhosts[i].scale.y;
+        Rectangle draw = {
+            trailGhosts[i].pos.x + (PLAYER_W - w) * 0.5f,
+            trailGhosts[i].pos.y + (PLAYER_H - h),
+            w, h
+        };
+
+        Color body = trailGhosts[i].grappling
+            ? (Color) { 220, 130, 60, (unsigned char)(60 * t) }
+        : (Color) { 200, 60, 60, (unsigned char)(60 * t) };
+
+        DrawRectangleRec(draw, body);
+    }
+}
+
 static void DrawParallaxBackground(Camera2D camera)
 {
     // Sky gradient
-    DrawRectangleGradientV(0, 0, SCREEN_W, SCREEN_H, (Color){ 150, 200, 240, 255 }, (Color){ 225, 240, 250, 255 });
+    DrawRectangleGradientV(0, 0, SCREEN_W, SCREEN_H, (Color) { 150, 200, 240, 255 }, (Color) { 225, 240, 250, 255 });
 
     // Far hills (slow parallax)
     float p1 = camera.target.x * 0.15f;
@@ -679,20 +918,20 @@ static void DrawParallaxBackground(Camera2D camera)
     }
 }
 
-static void DrawSolid(Solid *s)
+static void DrawSolid(Solid* s)
 {
     Color c;
     switch (s->type)
     {
-        case SOLID_FLOATING: c = (Color){ 120, 160, 220, 255 }; break;
-        case SOLID_WALL:     c = (Color){ 90, 90, 100, 255 }; break;
-        default:             c = (Color){ 80, 130, 80, 255 }; break;
+    case SOLID_FLOATING: c = (Color){ 120, 160, 220, 255 }; break;
+    case SOLID_WALL:     c = (Color){ 90, 90, 100, 255 }; break;
+    default:             c = (Color){ 80, 130, 80, 255 }; break;
     }
     DrawRectangleRec(s->rect, c);
-    DrawRectangleLinesEx(s->rect, 2, (Color){ 30, 30, 30, 255 });
+    DrawRectangleLinesEx(s->rect, 2, (Color) { 30, 30, 30, 255 });
     if (s->type == SOLID_GROUND)
     {
-        DrawRectangle((int)s->rect.x, (int)s->rect.y, (int)s->rect.width, 8, (Color){ 110, 190, 90, 255 });
+        DrawRectangle((int)s->rect.x, (int)s->rect.y, (int)s->rect.width, 8, (Color) { 110, 190, 90, 255 });
     }
 }
 
@@ -706,29 +945,29 @@ static void DrawSpike(Rectangle r)
         Vector2 p1 = { r.x + i * tw,           r.y + r.height };
         Vector2 p2 = { r.x + (i + 0.5f) * tw,  r.y };
         Vector2 p3 = { r.x + (i + 1) * tw,     r.y + r.height };
-        DrawTriangle(p1, p2, p3, (Color){ 190, 40, 40, 255 });
-        DrawTriangleLines(p1, p2, p3, (Color){ 90, 10, 10, 255 });
+        DrawTriangle(p1, p2, p3, (Color) { 190, 40, 40, 255 });
+        DrawTriangleLines(p1, p2, p3, (Color) { 90, 10, 10, 255 });
     }
 }
 
 static void DrawAnchor(Vector2 a, bool inRange)
 {
-    DrawCircleV(a, 9, inRange ? (Color){ 250, 210, 60, 255 } : (Color){ 90, 110, 170, 255 });
-    DrawCircleLines((int)a.x, (int)a.y, 9, (Color){ 20, 20, 30, 255 });
-    DrawCircleLines((int)a.x, (int)a.y, (int)GRAPPLE_RANGE, (Color){ 90, 110, 170, 40 });
+    DrawCircleV(a, 9, inRange ? (Color) { 250, 210, 60, 255 } : (Color) { 90, 110, 170, 255 });
+    DrawCircleLines((int)a.x, (int)a.y, 9, (Color) { 20, 20, 30, 255 });
+    DrawCircleLines((int)a.x, (int)a.y, (int)GRAPPLE_RANGE, (Color) { 90, 110, 170, 40 });
 }
 
-static void DrawCoin(Coin *c, float t)
+static void DrawCoin(Coin* c, float t)
 {
     if (c->collected) return;
     float bobY = sinf(t * 3.0f + c->bob) * 5.0f;
     float squish = 0.55f + 0.45f * fabsf(cosf(t * 2.2f + c->bob));
     Vector2 pos = { c->pos.x, c->pos.y + bobY };
-    DrawEllipse((int)pos.x, (int)pos.y, 10.0f * squish, 10.0f, (Color){ 255, 215, 60, 255 });
-    DrawEllipseLines((int)pos.x, (int)pos.y, 10.0f * squish, 10.0f, (Color){ 160, 120, 20, 255 });
+    DrawEllipse((int)pos.x, (int)pos.y, 10.0f * squish, 10.0f, (Color) { 255, 215, 60, 255 });
+    DrawEllipseLines((int)pos.x, (int)pos.y, 10.0f * squish, 10.0f, (Color) { 160, 120, 20, 255 });
 }
 
-static void DrawPlayer(Player *p)
+static void DrawPlayer(Player* p)
 {
     Rectangle pr = PlayerRect(p->position);
     Vector2 center = PlayerCenter(p);
@@ -737,9 +976,9 @@ static void DrawPlayer(Player *p)
     float h = PLAYER_H * p->scale.y;
     Rectangle draw = { center.x - w * 0.5f, center.y + PLAYER_H * 0.5f - h, w, h };
 
-    Color body = p->grappling ? (Color){ 220, 130, 60, 255 } : (Color){ 200, 60, 60, 255 };
+    Color body = p->grappling ? (Color) { 220, 130, 60, 255 } : (Color) { 200, 60, 60, 255 };
     DrawRectangleRec(draw, body);
-    DrawRectangleLinesEx(draw, 2, (Color){ 60, 10, 10, 255 });
+    DrawRectangleLinesEx(draw, 2, (Color) { 60, 10, 10, 255 });
 
     float eyeX = draw.x + draw.width * 0.5f + p->facing * 8.0f;
     DrawCircle((int)eyeX, (int)(draw.y + draw.height * 0.32f), 3, WHITE);
@@ -752,8 +991,8 @@ static void DrawPlayer(Player *p)
         {
             float a = 60 - i * 18;
             DrawLine((int)(pr.x - p->facing * (10 + i * 8)), (int)(pr.y + 10 + i * 6),
-                     (int)(pr.x - p->facing * (2 + i * 8)),  (int)(pr.y + 10 + i * 6),
-                     Fade(WHITE, a / 255.0f));
+                (int)(pr.x - p->facing * (2 + i * 8)), (int)(pr.y + 10 + i * 6),
+                Fade(WHITE, a / 255.0f));
         }
     }
 }
@@ -801,7 +1040,7 @@ int main(void)
             // ---- Horizontal input / momentum ----
             float moveDir = 0.0f;
             if (IsKeyDown(KEY_RIGHT) || IsKeyDown(KEY_D)) moveDir += 1.0f;
-            if (IsKeyDown(KEY_LEFT)  || IsKeyDown(KEY_A)) moveDir -= 1.0f;
+            if (IsKeyDown(KEY_LEFT) || IsKeyDown(KEY_A)) moveDir -= 1.0f;
             if (moveDir != 0.0f) player.facing = moveDir;
 
             float accel = player.onGround ? GROUND_ACCEL : AIR_ACCEL;
@@ -819,7 +1058,7 @@ int main(void)
                 if (player.onGround && GetRandomValue(0, 100) < 12)
                 {
                     Vector2 feet = { player.position.x + PLAYER_W * 0.5f, player.position.y + PLAYER_H };
-                    SpawnParticle(feet, (Vector2){ -moveDir * 40.0f, -30.0f }, 0.3f, 2.5f, (Color){ 210, 200, 170, 200 });
+                    SpawnParticle(feet, (Vector2) { -moveDir * 40.0f, -30.0f }, 0.3f, 2.5f, (Color) { 210, 200, 170, 200 });
                 }
             }
             else
@@ -855,7 +1094,7 @@ int main(void)
                 player.scale = (Vector2){ 0.7f, 1.35f };
                 Snd(sndJump);
                 Vector2 feet = { player.position.x + PLAYER_W * 0.5f, player.position.y + PLAYER_H };
-                SpawnBurst(feet, 6, 120.0f, 0.3f, 2.5f, (Color){ 210, 200, 170, 220 });
+                SpawnBurst(feet, 6, 120.0f, 0.3f, 2.5f, (Color) { 210, 200, 170, 220 });
             }
             // ---- Double jump: available once per airtime, refreshed by grounding or grappling ----
             else if (IsKeyPressed(KEY_SPACE) && !canGroundJump && !player.grappling && !player.usedDoubleJump)
@@ -866,7 +1105,7 @@ int main(void)
                 player.scale = (Vector2){ 0.75f, 1.3f };
                 Snd(sndDoubleJump);
                 Shake(2.0f, 0.06f);
-                SpawnBurst(PlayerCenter(&player), 14, 160.0f, 0.35f, 3.0f, (Color){ 180, 220, 255, 255 });
+                SpawnBurst(PlayerCenter(&player), 14, 160.0f, 0.35f, 3.0f, (Color) { 180, 220, 255, 255 });
             }
 
             if (IsKeyReleased(KEY_SPACE) && player.velocity.y < 0.0f)
@@ -901,7 +1140,7 @@ int main(void)
             {
                 Snd(sndDeath);
                 Shake(8.0f, 0.2f);
-                SpawnBurst(PlayerCenter(&player), 16, 220.0f, 0.5f, 4.0f, (Color){ 220, 40, 40, 255 });
+                SpawnBurst(PlayerCenter(&player), 16, 220.0f, 0.5f, 4.0f, (Color) { 220, 40, 40, 255 });
                 RespawnPlayer(&player);
             }
             if (player.position.y > WORLD_DEATH_Y)
@@ -916,7 +1155,7 @@ int main(void)
                 won = true;
                 Snd(sndWin);
                 Shake(10.0f, 0.3f);
-                SpawnBurst(PlayerCenter(&player), 40, 260.0f, 0.8f, 4.5f, (Color){ 255, 220, 90, 255 });
+                SpawnBurst(PlayerCenter(&player), 40, 260.0f, 0.8f, 4.5f, (Color) { 255, 220, 90, 255 });
                 if (bestTime < 0.0f || levelTime < bestTime) bestTime = levelTime;
             }
         }
@@ -925,13 +1164,53 @@ int main(void)
         if (shakeTime > 0.0f) shakeTime -= dt; else shakeMagnitude = 0.0f;
 
         // ---- Camera ----
-        camera.target = PlayerCenter(&player);
+        // ---- Speed intensity (0..1 based on horizontal velocity) ----
+        float rawSpeed = Vector2Length(player.velocity);
+        float targetIntensity = (rawSpeed - SPEED_BLUR_MIN) / (SPEED_BLUR_MAX - SPEED_BLUR_MIN);
+        if (targetIntensity < 0.0f) targetIntensity = 0.0f;
+        if (targetIntensity > 1.0f) targetIntensity = 1.0f;
+        // Only consider horizontal + downward speed for the "rush" feel
+        float horizSpeed = fabsf(player.velocity.x);
+        float horizIntensity = (horizSpeed - 200.0f) / 500.0f;
+        if (horizIntensity < 0.0f) horizIntensity = 0.0f;
+        if (horizIntensity > 1.0f) horizIntensity = 1.0f;
+
+        float finalIntensity = targetIntensity > horizIntensity ? targetIntensity : horizIntensity;
+
+        // Smooth intensity for visual filters
+        speedIntensity = Lerp(speedIntensity, finalIntensity, 1.0f - expf(-8.0f * dt));
+
+        // Smooth display speed for MPH (MPH = world units/sec * scale)
+        displaySpeed = Lerp(displaySpeed, rawSpeed, 1.0f - expf(-6.0f * dt));
+
+        // ---- Camera with lead/lag ----
+        Vector2 playerCenter = PlayerCenter(&player);
+
+        // Camera leads in movement direction, creating drag/anticipation feel
+        Vector2 leadOffset = {
+            player.velocity.x * CAMERA_LEAD_FACTOR * 0.25f,
+            player.velocity.y * CAMERA_LEAD_FACTOR * 0.12f  // less vertical lead
+        };
+
+        // When starting/stopping, camera lags behind
+        Vector2 desiredTarget = Vector2Add(playerCenter, leadOffset);
+
+        // Smooth camera position
+        Vector2 diff = Vector2Subtract(desiredTarget, cameraSmooth);
+        cameraSmooth = Vector2Add(cameraSmooth, Vector2Scale(diff, 1.0f - expf(-CAMERA_LAG_SPEED * dt)));
+
+        camera.target = cameraSmooth;
+
         float halfW = SCREEN_W / 2.0f;
         float halfH = SCREEN_H / 2.0f;
         if (camera.target.x < halfW) camera.target.x = halfW;
         if (camera.target.x > worldWidth - halfW) camera.target.x = worldWidth - halfW;
         if (camera.target.y < worldTopY + halfH) camera.target.y = worldTopY + halfH;
         if (camera.target.y > worldBottomY - halfH) camera.target.y = worldBottomY - halfH;
+
+        // Camera zoom pulls back slightly at high speed for wider view
+        float targetZoom = 1.0f - speedIntensity * 0.08f;
+        camera.zoom = Lerp(camera.zoom, targetZoom, 1.0f - expf(-6.0f * dt));
 
         Vector2 camOffset = { SCREEN_W / 2.0f, SCREEN_H / 2.0f };
         if (shakeMagnitude > 0.01f)
@@ -940,15 +1219,39 @@ int main(void)
             camOffset.y += (float)GetRandomValue(-100, 100) / 100.0f * shakeMagnitude;
             shakeMagnitude *= 0.9f;
         }
+        // High-speed micro-jitter for intensity
+        if (speedIntensity > 0.5f)
+        {
+            float jitter = (speedIntensity - 0.5f) * 4.0f;
+            camOffset.x += (float)GetRandomValue(-100, 100) / 100.0f * jitter;
+            camOffset.y += (float)GetRandomValue(-100, 100) / 100.0f * jitter * 0.5f;
+        }
         camera.offset = camOffset;
+
+        // ---- Spawn speed streaks based on player velocity ----
+        if (speedIntensity > 0.1f)
+        {
+            int streakCount = (int)(speedIntensity * 4.0f);
+            Vector2 sc = { SCREEN_W / 2.0f, SCREEN_H / 2.0f };
+            for (int i = 0; i < streakCount; i++)
+                SpawnSpeedStreak(player.velocity, sc);
+        }
+        UpdateSpeedStreaks(dt);
+
+        // ---- Update motion trail ----
+        UpdateTrailGhosts(&player, dt);
 
         // ---- Draw ----
         BeginDrawing();
-        ClearBackground((Color){ 190, 220, 245, 255 });
+        ClearBackground((Color) { 190, 220, 245, 255 });
 
+        // Apply camera zoom to background too for consistency
         DrawParallaxBackground(camera);
 
         BeginMode2D(camera);
+
+        // Draw trail ghosts before player
+        DrawTrailGhosts();
 
         for (int i = 0; i < solidCount; i++) DrawSolid(&solids[i]);
         for (int i = 0; i < spikeCount; i++) DrawSpike(spikes[i]);
@@ -961,15 +1264,21 @@ int main(void)
             DrawAnchor(anchors[i], inRange);
         }
 
-        DrawRectangleRec(goalRect, (Color){ 230, 230, 230, 255 });
-        DrawTriangle((Vector2){ goalRect.x + goalRect.width, goalRect.y },
-                     (Vector2){ goalRect.x + goalRect.width, goalRect.y + 22 },
-                     (Vector2){ goalRect.x + goalRect.width + 34, goalRect.y + 11 },
-                     (Color){ 60, 190, 90, 255 });
+        DrawRectangleRec(goalRect, (Color) { 230, 230, 230, 255 });
+        DrawTriangle((Vector2) { goalRect.x + goalRect.width, goalRect.y },
+            (Vector2) {
+            goalRect.x + goalRect.width, goalRect.y + 22
+        },
+            (Vector2) {
+            goalRect.x + goalRect.width + 34, goalRect.y + 11
+        },
+            (Color) {
+            60, 190, 90, 255
+        });
 
         if (player.grappling)
         {
-            DrawLineEx(PlayerCenter(&player), player.grappleAnchor, 2.5f, (Color){ 40, 40, 40, 255 });
+            DrawLineEx(PlayerCenter(&player), player.grappleAnchor, 2.5f, (Color) { 40, 40, 40, 255 });
         }
 
         DrawParticles();
@@ -977,33 +1286,112 @@ int main(void)
 
         EndMode2D();
 
+        // ---- Speed visual filters (drawn in screen space) ----
+        DrawRadialSpeedLines(player.velocity, speedIntensity);
+        DrawSpeedStreaks(camera);
+        DrawChromaticAberration(speedIntensity);
+        DrawSpeedVignette(speedIntensity);
+
+        // ---- HUD ----
+
         // ---- HUD ----
         DrawRectangle(0, 0, SCREEN_W, 84, Fade(BLACK, 0.35f));
         DrawText("A/D or Arrows: run   SPACE: jump (double-jump in air!)   F / Click: grapple",
-                 16, 8, 18, RAYWHITE);
+            16, 8, 18, RAYWHITE);
         DrawText("While grappling -> W/S or Up/Down: reel in/out    R: restart level",
-                 16, 32, 18, RAYWHITE);
+            16, 32, 18, RAYWHITE);
         DrawText("Hit a wall hard enough and you'll bounce off it",
-                 16, 56, 16, (Color){ 220, 220, 220, 255 });
+            16, 56, 16, (Color) { 220, 220, 220, 255 });
 
         char hud[128];
         snprintf(hud, sizeof(hud), "Coins: %d/%d      Time: %05.2fs", coinsCollected, coinCount, levelTime);
         int hw = MeasureText(hud, 22);
-        DrawText(hud, SCREEN_W - hw - 16, 12, 22, (Color){ 255, 230, 120, 255 });
+        DrawText(hud, SCREEN_W - hw - 16, 12, 22, (Color) { 255, 230, 120, 255 });
+
+        // ---- MPH counter (bottom center) ----
+        {
+            float mph = displaySpeed * MPH_SCALE;
+
+            // Color shifts from white -> yellow -> orange -> red as speed increases
+            Color mphColor;
+            if (speedIntensity < 0.33f)
+            {
+                float t = speedIntensity / 0.33f;
+                mphColor = (Color){
+                    255,
+                    (unsigned char)(255 - t * 30),
+                    (unsigned char)(255 - t * 200),
+                    255
+                };
+            }
+            else if (speedIntensity < 0.66f)
+            {
+                float t = (speedIntensity - 0.33f) / 0.33f;
+                mphColor = (Color){
+                    255,
+                    (unsigned char)(225 - t * 80),
+                    (unsigned char)(55 - t * 40),
+                    255
+                };
+            }
+            else
+            {
+                float t = (speedIntensity - 0.66f) / 0.34f;
+                mphColor = (Color){
+                    (unsigned char)(255 - t * 30),
+                    (unsigned char)(145 - t * 100),
+                    (unsigned char)(15),
+                    255
+                };
+            }
+
+            char mphText[32];
+            snprintf(mphText, sizeof(mphText), "%3.0f MPH", mph);
+            int mphW = MeasureText(mphText, 36);
+
+            // Background panel for readability
+            DrawRectangle(SCREEN_W / 2 - mphW / 2 - 16, SCREEN_H - 60, mphW + 32, 48,
+                Fade(BLACK, 0.45f + speedIntensity * 0.3f));
+
+            // Slight scale pulse at high speed
+            float pulse = 1.0f + speedIntensity * 0.08f * sinf(levelTime * 20.0f);
+            int fontSize = (int)(36 * pulse);
+
+            DrawText(mphText, SCREEN_W / 2 - mphW / 2, SCREEN_H - 54, fontSize, mphColor);
+
+            // Speed bar underneath
+            float barW = 300.0f;
+            float barH = 6.0f;
+            float barX = SCREEN_W / 2 - barW / 2;
+            float barY = SCREEN_H - 16;
+
+            DrawRectangle((int)barX, (int)barY, (int)barW, (int)barH, Fade(BLACK, 0.5f));
+            DrawRectangle((int)barX, (int)barY, (int)(barW * speedIntensity), (int)barH, mphColor);
+
+            // Tick marks at thirds
+            for (int i = 1; i < 3; i++)
+            {
+                int tx = (int)(barX + barW * i / 3.0f);
+                DrawRectangle(tx, (int)barY - 2, 1, (int)barH + 4, Fade(WHITE, 0.4f));
+            }
+
+            // "SPEED" label on the side
+            DrawText("SPEED", (int)(barX - 56), (int)(barY - 4), 14, Fade(WHITE, 0.6f));
+        }
         if (bestTime > 0.0f)
         {
             char best[64];
             snprintf(best, sizeof(best), "Best: %05.2fs", bestTime);
             int bw = MeasureText(best, 18);
-            DrawText(best, SCREEN_W - bw - 16, 38, 18, (Color){ 200, 220, 255, 255 });
+            DrawText(best, SCREEN_W - bw - 16, 38, 18, (Color) { 200, 220, 255, 255 });
         }
 
         if (won)
         {
-            const char *msg = "LEVEL COMPLETE! Press R to play again.";
+            const char* msg = "LEVEL COMPLETE! Press R to play again.";
             int w = MeasureText(msg, 40);
             DrawRectangle(SCREEN_W / 2 - w / 2 - 20, SCREEN_H / 2 - 50, w + 40, 100, Fade(BLACK, 0.6f));
-            DrawText(msg, SCREEN_W / 2 - w / 2, SCREEN_H / 2 - 30, 40, (Color){ 250, 220, 80, 255 });
+            DrawText(msg, SCREEN_W / 2 - w / 2, SCREEN_H / 2 - 30, 40, (Color) { 250, 220, 80, 255 });
             char sub[96];
             snprintf(sub, sizeof(sub), "Time: %05.2fs   Coins: %d/%d", levelTime, coinsCollected, coinCount);
             int sw = MeasureText(sub, 20);
