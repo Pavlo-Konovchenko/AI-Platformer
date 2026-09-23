@@ -446,15 +446,13 @@ static void ResolveSolidOverlap(Player *p)
         Rectangle r = solids[i].rect;
         if (!CheckCollisionRecs(pr, r)) continue;
 
-        float overlapLeft = (pr.x + pr.width) - r.x;
-        float overlapRight = (r.x + r.width) - pr.x;
-        float overlapTop = (pr.y + pr.height) - r.y;
-        float overlapBottom = (r.y + r.height) - pr.y;
+        Rectangle overlap = GetCollisionRec(pr, r);
+        bool playerLeftOfCenter = (pr.x + pr.width * 0.5f) < (r.x + r.width * 0.5f);
+        bool playerAboveCenter = (pr.y + pr.height * 0.5f) < (r.y + r.height * 0.5f);
+        float pushX = playerLeftOfCenter ? -overlap.width : overlap.width;
+        float pushY = playerAboveCenter ? -overlap.height : overlap.height;
 
-        float pushX = (overlapLeft < overlapRight) ? -overlapLeft : overlapRight;
-        float pushY = (overlapTop < overlapBottom) ? -overlapTop : overlapBottom;
-
-        if (fabsf(pushX) < fabsf(pushY))
+        if (overlap.width < overlap.height)
         {
             p->position.x += pushX;
             if (solids[i].type == SOLID_WALL && fabsf(p->velocity.x) > WALL_BOUNCE_SPEED_THRESHOLD)
@@ -513,42 +511,24 @@ static void RespawnPlayer(Player *p)
 // Grapple
 //------------------------------------------------------------------------------------
 
-// Standard slab-method test for whether the segment from origin, going
-// maxDist along the unit vector dir, intersects rectangle r.
+// Whether the segment from origin, going maxDist along the unit vector dir,
+// intersects rectangle r. Built from raylib's own point/line collision
+// checks rather than a hand-rolled slab test.
 static bool SegmentHitsRect(Vector2 origin, Vector2 dir, float maxDist, Rectangle r)
 {
-    float tmin = 0.0f;
-    float tmax = maxDist;
+    Vector2 end = Vector2Add(origin, Vector2Scale(dir, maxDist));
 
-    if (fabsf(dir.x) < 1e-6f)
-    {
-        if (origin.x < r.x || origin.x > r.x + r.width) return false;
-    }
-    else
-    {
-        float t1 = (r.x - origin.x) / dir.x;
-        float t2 = (r.x + r.width - origin.x) / dir.x;
-        if (t1 > t2) { float tmp = t1; t1 = t2; t2 = tmp; }
-        if (t1 > tmin) tmin = t1;
-        if (t2 < tmax) tmax = t2;
-        if (tmin > tmax) return false;
-    }
+    if (CheckCollisionPointRec(origin, r) || CheckCollisionPointRec(end, r)) return true;
 
-    if (fabsf(dir.y) < 1e-6f)
-    {
-        if (origin.y < r.y || origin.y > r.y + r.height) return false;
-    }
-    else
-    {
-        float t1 = (r.y - origin.y) / dir.y;
-        float t2 = (r.y + r.height - origin.y) / dir.y;
-        if (t1 > t2) { float tmp = t1; t1 = t2; t2 = tmp; }
-        if (t1 > tmin) tmin = t1;
-        if (t2 < tmax) tmax = t2;
-        if (tmin > tmax) return false;
-    }
+    Vector2 tl = { r.x, r.y };
+    Vector2 tr = { r.x + r.width, r.y };
+    Vector2 br = { r.x + r.width, r.y + r.height };
+    Vector2 bl = { r.x, r.y + r.height };
 
-    return true;
+    return CheckCollisionLines(origin, end, tl, tr, NULL)
+        || CheckCollisionLines(origin, end, tr, br, NULL)
+        || CheckCollisionLines(origin, end, br, bl, NULL)
+        || CheckCollisionLines(origin, end, bl, tl, NULL);
 }
 
 // The rope is only allowed to refuse shortening when a wall is genuinely
@@ -563,7 +543,7 @@ static bool ReelBlockedByWall(Player* p)
     Vector2 diff = Vector2Subtract(center, p->grappleAnchor);
     float dist = Vector2Length(diff);
     if (dist < 0.0001f) return false;
-    Vector2 dir = Vector2Scale(diff, 1.0f / dist);
+    Vector2 dir = Vector2Normalize(diff);
 
     Rectangle pr = PlayerRect(p->position);
     Rectangle touchRect = (Rectangle){ pr.x - 1, pr.y - 1, pr.width + 2, pr.height + 2 };
@@ -595,8 +575,7 @@ static void TryFireGrapple(Player *p)
     {
         p->grappling = true;
         p->grappleAnchor = anchors[best];
-        p->ropeLength = Vector2Distance(center, anchors[best]);
-        if (p->ropeLength < GRAPPLE_MIN_LEN) p->ropeLength = GRAPPLE_MIN_LEN;
+        p->ropeLength = fmaxf(Vector2Distance(center, anchors[best]), GRAPPLE_MIN_LEN);
         p->usedDoubleJump = false; // grappling refreshes the double jump for extra chaining fun
         Snd(sndGrapple);
         SpawnBurst(anchors[best], 10, 160.0f, 0.4f, 3.0f, (Color){ 250, 210, 60, 255 });
@@ -612,13 +591,11 @@ static void UpdateGrapple(Player *p, float dt)
     // always allowed.
     if ((IsKeyDown(KEY_UP) || IsKeyDown(KEY_W)) && !ReelBlockedByWall(p))
     {
-        p->ropeLength -= GRAPPLE_REEL_SPD * dt;
-        if (p->ropeLength < GRAPPLE_MIN_LEN) p->ropeLength = GRAPPLE_MIN_LEN;
+        p->ropeLength = Clamp(p->ropeLength - GRAPPLE_REEL_SPD * dt, GRAPPLE_MIN_LEN, GRAPPLE_RANGE);
     }
     if (IsKeyDown(KEY_DOWN) || IsKeyDown(KEY_S))
     {
-        p->ropeLength += GRAPPLE_REEL_SPD * dt;
-        if (p->ropeLength > GRAPPLE_RANGE) p->ropeLength = GRAPPLE_RANGE;
+        p->ropeLength = Clamp(p->ropeLength + GRAPPLE_REEL_SPD * dt, GRAPPLE_MIN_LEN, GRAPPLE_RANGE);
     }
 
     Vector2 center = PlayerCenter(p);
@@ -627,7 +604,7 @@ static void UpdateGrapple(Player *p, float dt)
 
     if (dist > p->ropeLength && dist > 0.0001f)
     {
-        Vector2 dir = Vector2Scale(diff, 1.0f / dist);
+        Vector2 dir = Vector2Normalize(diff);
 
         // Snap back onto the rope circle
         Vector2 newCenter = Vector2Add(p->grappleAnchor, Vector2Scale(dir, p->ropeLength));
@@ -642,7 +619,7 @@ static void UpdateGrapple(Player *p, float dt)
             p->velocity = Vector2Subtract(p->velocity, Vector2Scale(dir, radialSpeed));
         }
 
-        Vector2 tangent = (Vector2){ -dir.y, dir.x };
+        Vector2 tangent = Vector2Rotate(dir, PI * 0.5f);
         float tangentSpeed = Vector2DotProduct(p->velocity, tangent);
         float sign = (tangentSpeed >= 0) ? 1.0f : -1.0f;
         p->velocity = Vector2Add(p->velocity, Vector2Scale(tangent, sign * GRAPPLE_PULL_ACC * dt * 0.15f));
@@ -800,8 +777,7 @@ int main(void)
 
     while (!WindowShouldClose())
     {
-        float dt = GetFrameTime();
-        if (dt > 1.0f / 30.0f) dt = 1.0f / 30.0f;
+        float dt = fminf(GetFrameTime(), 1.0f / 30.0f);
 
         if (IsKeyPressed(KEY_R))
         {
@@ -828,10 +804,11 @@ int main(void)
             if (moveDir != 0.0f)
             {
                 player.velocity.x += moveDir * accel * dt;
+                // Only clamp when input is actively pushing past the cap;
+                // momentum from swings/falls can still exceed this.
                 if (!player.grappling)
                 {
-                    if (player.velocity.x > MAX_RUN_SPEED) player.velocity.x = MAX_RUN_SPEED;
-                    if (player.velocity.x < -MAX_RUN_SPEED) player.velocity.x = -MAX_RUN_SPEED;
+                    player.velocity.x = Clamp(player.velocity.x, -MAX_RUN_SPEED, MAX_RUN_SPEED);
                 }
                 // occasional running dust while grounded and moving fast
                 if (player.onGround && GetRandomValue(0, 100) < 12)
@@ -901,7 +878,7 @@ int main(void)
 
             // ---- Gravity ----
             player.velocity.y += GRAVITY * dt;
-            if (player.velocity.y > MAX_FALL_SPEED) player.velocity.y = MAX_FALL_SPEED;
+            player.velocity.y = fminf(player.velocity.y, MAX_FALL_SPEED);
 
             // ---- Physics step ----
             MoveAndCollide(&player, dt);
@@ -946,10 +923,8 @@ int main(void)
         camera.target = PlayerCenter(&player);
         float halfW = SCREEN_W / 2.0f;
         float halfH = SCREEN_H / 2.0f;
-        if (camera.target.x < halfW) camera.target.x = halfW;
-        if (camera.target.x > worldWidth - halfW) camera.target.x = worldWidth - halfW;
-        if (camera.target.y < worldTopY + halfH) camera.target.y = worldTopY + halfH;
-        if (camera.target.y > worldBottomY - halfH) camera.target.y = worldBottomY - halfH;
+        camera.target.x = Clamp(camera.target.x, halfW, worldWidth - halfW);
+        camera.target.y = Clamp(camera.target.y, worldTopY + halfH, worldBottomY - halfH);
 
         Vector2 camOffset = { SCREEN_W / 2.0f, SCREEN_H / 2.0f };
         if (shakeMagnitude > 0.01f)
