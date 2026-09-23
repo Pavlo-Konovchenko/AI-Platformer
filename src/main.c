@@ -47,6 +47,8 @@
 #define MAX_COINS   32
 #define MAX_PARTICLES 300
 
+typedef enum { STATE_MENU, STATE_PLAYING } GameState;
+
 typedef enum { SOLID_GROUND, SOLID_FLOATING, SOLID_WALL } SolidType;
 
 typedef struct {
@@ -674,6 +676,48 @@ static void DrawParallaxBackground(Camera2D camera)
     }
 }
 
+// Input check for a rectangle button -- safe to call outside BeginDrawing.
+static bool IsButtonClicked(Rectangle rect)
+{
+    return CheckCollisionPointRec(GetMousePosition(), rect) && IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
+}
+
+// Draws a button, highlighted and slightly enlarged while the mouse hovers it.
+static void DrawButton(Rectangle rect, const char *label, int fontSize)
+{
+    bool hovered = CheckCollisionPointRec(GetMousePosition(), rect);
+    Rectangle r = rect;
+    if (hovered)
+    {
+        r.x -= 5; r.y -= 5; r.width += 10; r.height += 10;
+    }
+
+    Color border = (Color){ 40, 40, 60, 255 };
+    Color bg = hovered ? (Color){ 250, 220, 120, 255 } : (Color){ 235, 235, 245, 255 };
+
+    Rectangle shadow = { r.x + 3, r.y + 5, r.width, r.height };
+    DrawRectangleRounded(shadow, 0.3f, 8, Fade(BLACK, 0.25f));
+    DrawRectangleRounded(r, 0.3f, 8, bg);
+    DrawRectangleRoundedLinesEx(r, 0.3f, 8, 2.0f, border);
+
+    int tw = MeasureText(label, fontSize);
+    DrawText(label, (int)(r.x + r.width * 0.5f - tw * 0.5f),
+             (int)(r.y + r.height * 0.5f - fontSize * 0.5f), fontSize, border);
+}
+
+// Deterministic twinkling starfield overlay (no particle/physics state needed).
+static void DrawTwinkleStars(float time)
+{
+    for (int i = 0; i < 40; i++)
+    {
+        float seed = (float)i * 37.13f;
+        float x = fmodf(seed * 53.0f, (float)SCREEN_W);
+        float y = fmodf(seed * 91.0f, (float)SCREEN_H);
+        float twinkle = 0.5f + 0.5f * sinf(time * 2.0f + seed);
+        DrawCircle((int)x, (int)y, 1.5f + twinkle * 1.5f, Fade(WHITE, 0.15f + twinkle * 0.35f));
+    }
+}
+
 static void DrawSolid(Solid *s)
 {
     Color c;
@@ -774,10 +818,90 @@ int main(void)
     camera.zoom = 1.0f;
 
     bool won = false;
+    bool quitRequested = false;
+    GameState state = STATE_MENU;
 
-    while (!WindowShouldClose())
+    Rectangle playButton = { SCREEN_W / 2.0f - 110, SCREEN_H / 2.0f - 30, 220, 56 };
+    Rectangle quitButton  = { SCREEN_W / 2.0f - 110, SCREEN_H / 2.0f + 40, 220, 56 };
+    float menuTime = 0.0f;
+    bool playHoveredPrev = false;
+    bool quitHoveredPrev = false;
+
+    while (!WindowShouldClose() && !quitRequested)
     {
         float dt = fminf(GetFrameTime(), 1.0f / 30.0f);
+
+        if (state == STATE_MENU)
+        {
+            menuTime += dt;
+
+            // Slow auto-pan keeps the parallax hills/clouds drifting instead
+            // of sitting frozen behind the menu.
+            camera.target.x = menuTime * 35.0f;
+
+            bool playHovered = CheckCollisionPointRec(GetMousePosition(), playButton);
+            bool quitHovered = CheckCollisionPointRec(GetMousePosition(), quitButton);
+            if ((playHovered && !playHoveredPrev) || (quitHovered && !quitHoveredPrev)) Snd(sndCoin);
+            playHoveredPrev = playHovered;
+            quitHoveredPrev = quitHovered;
+
+            bool startClicked = IsButtonClicked(playButton) || IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_SPACE);
+            bool quitClicked = IsButtonClicked(quitButton) || IsKeyPressed(KEY_ESCAPE);
+
+            if (startClicked)
+            {
+                Snd(sndGrapple);
+                Vector2 btnCenter = { playButton.x + playButton.width * 0.5f, playButton.y + playButton.height * 0.5f };
+                SpawnBurst(btnCenter, 16, 200.0f, 0.5f, 3.5f, (Color){ 250, 220, 120, 255 });
+                state = STATE_PLAYING;
+                RespawnPlayer(&player);
+                won = false;
+                levelTime = 0.0f;
+                coinsCollected = 0;
+                for (int i = 0; i < coinCount; i++) coins[i].collected = false;
+            }
+            if (quitClicked) quitRequested = true;
+
+            UpdateParticles(dt);
+
+            BeginDrawing();
+            ClearBackground((Color){ 190, 220, 245, 255 });
+            DrawParallaxBackground(camera);
+            DrawTwinkleStars(menuTime);
+
+            Rectangle panel = { SCREEN_W / 2.0f - 340, SCREEN_H / 2.0f - 220, 680, 420 };
+            DrawRectangleRounded(panel, 0.08f, 12, Fade(BLACK, 0.22f));
+
+            const char *title = "AI PLATFORMER";
+            int fontSize = 64;
+            int tw = MeasureText(title, fontSize);
+            float titleY = SCREEN_H / 2.0f - 160.0f + sinf(menuTime * 1.6f) * 5.0f;
+            DrawText(title, SCREEN_W / 2 - tw / 2 + 3, (int)titleY + 3, fontSize, Fade(BLACK, 0.35f));
+            DrawText(title, SCREEN_W / 2 - tw / 2, (int)titleY, fontSize, (Color){ 255, 236, 160, 255 });
+
+            DrawButton(playButton, "PLAY", 26);
+            DrawButton(quitButton, "QUIT", 26);
+
+            DrawParticles();
+
+            const char *controls1 = "A/D or Arrows: run   SPACE: jump (double-jump in air!)   F / Click: grapple";
+            const char *controls2 = "While grappling -> W/S or Up/Down: reel in/out    R: restart level";
+            int cw1 = MeasureText(controls1, 16);
+            int cw2 = MeasureText(controls2, 16);
+            DrawText(controls1, SCREEN_W / 2 - cw1 / 2, SCREEN_H / 2 + 120, 16, (Color){ 230, 230, 235, 255 });
+            DrawText(controls2, SCREEN_W / 2 - cw2 / 2, SCREEN_H / 2 + 144, 16, (Color){ 230, 230, 235, 255 });
+
+            if (bestTime > 0.0f)
+            {
+                char best[64];
+                snprintf(best, sizeof(best), "Best time: %05.2fs", bestTime);
+                int bw = MeasureText(best, 20);
+                DrawText(best, SCREEN_W / 2 - bw / 2, SCREEN_H / 2 + 180, 20, (Color){ 250, 220, 120, 255 });
+            }
+
+            EndDrawing();
+            continue;
+        }
 
         if (IsKeyPressed(KEY_R))
         {
