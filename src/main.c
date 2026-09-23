@@ -29,7 +29,12 @@
 #define GRAPPLE_REEL_SPD  260.0f
 #define GRAPPLE_PULL_ACC  1800.0f  // swing-in assist toward tangential motion
 
-#define WORLD_DEATH_Y     1000.0f  // fall past this -> respawn (pit)
+// Wall-bounce: hitting a SOLID_WALL above this speed reflects velocity
+// instead of just stopping it dead.
+#define WALL_BOUNCE_SPEED_THRESHOLD  480.0f
+#define WALL_BOUNCE_RESTITUTION      0.55f   // fraction of speed kept after bounce
+
+#define WORLD_DEATH_Y     1400.0f  // fall past this -> respawn (pit)
 
 #define MAX_SOLIDS  48
 #define MAX_SPIKES  24
@@ -60,7 +65,9 @@ static Vector2 anchors[MAX_ANCHORS];
 static int     anchorCount = 0;
 static Rectangle goalRect;
 static Vector2 spawnPoint;
-static float   worldWidth = 4400.0f;
+static float   worldWidth = 6000.0f;
+static float   worldTopY = -60.0f;   // highest point the camera should show
+static float   worldBottomY = 1000.0f; // lowest point the camera should show
 
 static void AddSolid(float x, float y, float w, float h, SolidType type)
 {
@@ -92,9 +99,9 @@ static void BuildLevel(void)
     solidCount = spikeCount = anchorCount = 0;
 
     // --- Section 1: start, simple gap ---
-    AddSolid(   0, 650, 520, 100, SOLID_GROUND);
+    AddSolid(0, 650, 520, 100, SOLID_GROUND);
     // pit: 520 - 660
-    AddSolid( 660, 650, 380, 100, SOLID_GROUND);
+    AddSolid(660, 650, 380, 100, SOLID_GROUND);
 
     // --- Section 2: low wall to jump over, then spikes on the ground ---
     AddSolid(1040, 460, 40, 290, SOLID_WALL);
@@ -119,20 +126,41 @@ static void BuildLevel(void)
     // --- Section 6: tall wall, must swing over the top ---
     AddSolid(2960, 380, 40, 370, SOLID_WALL);
     AddAnchor(2980, 220);
-    AddSolid(3040, 650, 260, 100, SOLID_GROUND);
 
-    // --- Section 7: final big pit + swing, then home stretch ---
-    // pit: 3300 - 3600
-    AddAnchor(3450, 340);
-    AddSolid(3600, 650, 800, 100, SOLID_GROUND);
-    AddSpike(3820, 630, 90, 20);
-    AddSpike(3980, 630, 90, 20);
+    // --- Section 7: the Sky Tower ---
+    // A narrow vertical chimney between two facing walls. The floor runs
+    // under the whole shaft, and a stack of anchors lets the player
+    // grapple-climb straight up, bouncing off either wall if they drift
+    // into one too fast. Exit is a ledge poking out above the right wall.
+    AddSolid(3040, 650, 540, 100, SOLID_GROUND);   // shaft floor (extends section 6's ground)
+    AddSolid(3300, 250, 40, 300, SOLID_WALL);      // left shaft wall (overhang, floor below is clear to walk under)
+    AddSolid(3540, 250, 40, 300, SOLID_WALL);      // right shaft wall (overhang, same)
+    AddAnchor(3440, 560);
+    AddAnchor(3440, 430);
+    AddAnchor(3440, 300);
+    AddAnchor(3440, 170);
+    AddSolid(3540, 150, 220, 30, SOLID_FLOATING);  // exit ledge above the right wall
+
+    // --- Section 8: floating staircase back down from the tower ---
+    AddSolid(3760, 300, 150, 30, SOLID_FLOATING);
+    AddSolid(3960, 440, 150, 30, SOLID_FLOATING);
+    AddSolid(4160, 580, 150, 30, SOLID_FLOATING);
+    AddSolid(4360, 650, 400, 100, SOLID_GROUND);
+    AddSpike(4480, 630, 90, 20);
+    AddSpike(4630, 630, 90, 20);
+
+    // --- Section 9: final big pit + swing, then home stretch ---
+    // pit: 4760 - 5060
+    AddAnchor(4910, 340);
+    AddSolid(5060, 650, 800, 100, SOLID_GROUND);
+    AddSpike(5280, 630, 90, 20);
+    AddSpike(5440, 630, 90, 20);
 
     // Floating bonus platform near the end (optional path)
-    AddSolid(4150, 520, 160, 30, SOLID_FLOATING);
-    AddAnchor(4230, 330);
+    AddSolid(5610, 520, 160, 30, SOLID_FLOATING);
+    AddAnchor(5690, 330);
 
-    goalRect = (Rectangle){ 4300, 580, 40, 70 };
+    goalRect = (Rectangle){ 5760, 580, 40, 70 };
 
     spawnPoint = (Vector2){ 60, 650 - PLAYER_H };
 }
@@ -142,10 +170,10 @@ static void BuildLevel(void)
 //------------------------------------------------------------------------------------
 static Rectangle PlayerRect(Vector2 pos)
 {
-    return (Rectangle){ pos.x, pos.y, PLAYER_W, PLAYER_H };
+    return (Rectangle) { pos.x, pos.y, PLAYER_W, PLAYER_H };
 }
 
-static void MoveAndCollide(Player *p, float dt)
+static void MoveAndCollide(Player* p, float dt)
 {
     // --- Horizontal ---
     p->position.x += p->velocity.x * dt;
@@ -156,7 +184,16 @@ static void MoveAndCollide(Player *p, float dt)
         {
             if (p->velocity.x > 0.0f) p->position.x = solids[i].rect.x - PLAYER_W;
             else if (p->velocity.x < 0.0f) p->position.x = solids[i].rect.x + solids[i].rect.width;
-            p->velocity.x = 0.0f;
+
+            if (solids[i].type == SOLID_WALL && fabsf(p->velocity.x) > WALL_BOUNCE_SPEED_THRESHOLD)
+            {
+                // Hit a wall hard enough to bounce off it instead of stopping dead.
+                p->velocity.x = -p->velocity.x * WALL_BOUNCE_RESTITUTION;
+            }
+            else
+            {
+                p->velocity.x = 0.0f;
+            }
             pr = PlayerRect(p->position);
         }
     }
@@ -184,7 +221,47 @@ static void MoveAndCollide(Player *p, float dt)
     }
 }
 
-static bool TouchesAnySpike(Player *p)
+// The grapple constraint repositions the player directly (it snaps them onto
+// the rope circle), which bypasses MoveAndCollide's swept collision and lets
+// the player's body end up inside a wall if the rope circle passes through
+// one. This pushes the player back out along the shallowest overlap axis
+// after any such reposition, and applies the same high-speed wall bounce
+// used by normal movement.
+static void ResolveSolidOverlap(Player* p)
+{
+    Rectangle pr = PlayerRect(p->position);
+    for (int i = 0; i < solidCount; i++)
+    {
+        Rectangle r = solids[i].rect;
+        if (!CheckCollisionRecs(pr, r)) continue;
+
+        float overlapLeft = (pr.x + pr.width) - r.x;
+        float overlapRight = (r.x + r.width) - pr.x;
+        float overlapTop = (pr.y + pr.height) - r.y;
+        float overlapBottom = (r.y + r.height) - pr.y;
+
+        float pushX = (overlapLeft < overlapRight) ? -overlapLeft : overlapRight;
+        float pushY = (overlapTop < overlapBottom) ? -overlapTop : overlapBottom;
+
+        if (fabsf(pushX) < fabsf(pushY))
+        {
+            p->position.x += pushX;
+            if (solids[i].type == SOLID_WALL && fabsf(p->velocity.x) > WALL_BOUNCE_SPEED_THRESHOLD)
+                p->velocity.x = -p->velocity.x * WALL_BOUNCE_RESTITUTION;
+            else
+                p->velocity.x = 0.0f;
+        }
+        else
+        {
+            p->position.y += pushY;
+            if (pushY < 0.0f) p->onGround = true; // pushed up -> was landing on top of solid
+            p->velocity.y = 0.0f;
+        }
+        pr = PlayerRect(p->position);
+    }
+}
+
+static bool TouchesAnySpike(Player* p)
 {
     Rectangle pr = PlayerRect(p->position);
     for (int i = 0; i < spikeCount; i++)
@@ -192,7 +269,7 @@ static bool TouchesAnySpike(Player *p)
     return false;
 }
 
-static void RespawnPlayer(Player *p)
+static void RespawnPlayer(Player* p)
 {
     p->position = spawnPoint;
     p->velocity = (Vector2){ 0, 0 };
@@ -203,12 +280,62 @@ static void RespawnPlayer(Player *p)
 //------------------------------------------------------------------------------------
 // Grapple
 //------------------------------------------------------------------------------------
-static Vector2 PlayerCenter(Player *p)
+static Vector2 PlayerCenter(Player* p)
 {
-    return (Vector2){ p->position.x + PLAYER_W * 0.5f, p->position.y + PLAYER_H * 0.5f };
+    return (Vector2) { p->position.x + PLAYER_W * 0.5f, p->position.y + PLAYER_H * 0.5f };
 }
 
-static void TryFireGrapple(Player *p)
+// Casts a ray from origin along the unit vector dir and returns the distance
+// to the nearest solid it hits, capped at maxDist (returned if nothing is
+// hit). Uses the standard slab method for ray-vs-AABB intersection. This is
+// what stops the grapple rope from reeling the player straight through a
+// wall that sits between the anchor and them: no matter how much the rope
+// wants to shorten, it can't get shorter than the distance to that wall.
+static float RaycastSolids(Vector2 origin, Vector2 dir, float maxDist)
+{
+    float nearest = maxDist;
+    for (int i = 0; i < solidCount; i++)
+    {
+        Rectangle r = solids[i].rect;
+        float tmin = 0.0f;
+        float tmax = nearest;
+
+        if (fabsf(dir.x) < 1e-6f)
+        {
+            if (origin.x < r.x || origin.x > r.x + r.width) continue;
+        }
+        else
+        {
+            float t1 = (r.x - origin.x) / dir.x;
+            float t2 = (r.x + r.width - origin.x) / dir.x;
+            if (t1 > t2) { float tmp = t1; t1 = t2; t2 = tmp; }
+            if (t1 > tmin) tmin = t1;
+            if (t2 < tmax) tmax = t2;
+            if (tmin > tmax) continue;
+        }
+
+        if (fabsf(dir.y) < 1e-6f)
+        {
+            if (origin.y < r.y || origin.y > r.y + r.height) continue;
+        }
+        else
+        {
+            float t1 = (r.y - origin.y) / dir.y;
+            float t2 = (r.y + r.height - origin.y) / dir.y;
+            if (t1 > t2) { float tmp = t1; t1 = t2; t2 = tmp; }
+            if (t1 > tmin) tmin = t1;
+            if (t2 < tmax) tmax = t2;
+            if (tmin > tmax) continue;
+        }
+
+        // Small epsilon so a solid the ray starts exactly touching doesn't
+        // clamp the rope to ~0.
+        if (tmin > 0.0001f && tmin < nearest) nearest = tmin;
+    }
+    return nearest;
+}
+
+static void TryFireGrapple(Player* p)
 {
     Vector2 center = PlayerCenter(p);
     int best = -1;
@@ -231,7 +358,7 @@ static void TryFireGrapple(Player *p)
     }
 }
 
-static void UpdateGrapple(Player *p, float dt)
+static void UpdateGrapple(Player* p, float dt)
 {
     if (!p->grappling) return;
 
@@ -255,10 +382,24 @@ static void UpdateGrapple(Player *p, float dt)
     {
         Vector2 dir = Vector2Scale(diff, 1.0f / dist);
 
+        // The rope can't reel any shorter than the distance to whatever
+        // solid stands between the anchor and the player -- otherwise
+        // holding reel-in (or even just a taut swing) would keep recomputing
+        // a target point past the obstruction, walking the player through
+        // it a few pixels a frame even though ResolveSolidOverlap pushes
+        // them back out afterward each time.
+        float wallDist = RaycastSolids(p->grappleAnchor, dir, dist);
+        if (wallDist < p->ropeLength) p->ropeLength = wallDist;
+
         // Snap back onto the rope circle
         Vector2 newCenter = Vector2Add(p->grappleAnchor, Vector2Scale(dir, p->ropeLength));
         p->position.x = newCenter.x - PLAYER_W * 0.5f;
         p->position.y = newCenter.y - PLAYER_H * 0.5f;
+
+        // The raycast above is a single point and doesn't know the player's
+        // width/height, so it can still leave the body edge-on into a wall;
+        // push back out and apply wall-bounce as a final cleanup.
+        ResolveSolidOverlap(p);
 
         // Remove outward radial velocity (rope is taut, not a spring)
         float radialSpeed = Vector2DotProduct(p->velocity, dir);
@@ -278,21 +419,21 @@ static void UpdateGrapple(Player *p, float dt)
 //------------------------------------------------------------------------------------
 // Drawing
 //------------------------------------------------------------------------------------
-static void DrawSolid(Solid *s)
+static void DrawSolid(Solid* s)
 {
     Color c;
     switch (s->type)
     {
-        case SOLID_FLOATING: c = (Color){ 120, 160, 220, 255 }; break;
-        case SOLID_WALL:     c = (Color){ 90, 90, 100, 255 }; break;
-        default:             c = (Color){ 80, 130, 80, 255 }; break;
+    case SOLID_FLOATING: c = (Color){ 120, 160, 220, 255 }; break;
+    case SOLID_WALL:     c = (Color){ 90, 90, 100, 255 }; break;
+    default:             c = (Color){ 80, 130, 80, 255 }; break;
     }
     DrawRectangleRec(s->rect, c);
-    DrawRectangleLinesEx(s->rect, 2, (Color){ 30, 30, 30, 255 });
+    DrawRectangleLinesEx(s->rect, 2, (Color) { 30, 30, 30, 255 });
     if (s->type == SOLID_GROUND)
     {
         // grassy top strip
-        DrawRectangle((int)s->rect.x, (int)s->rect.y, (int)s->rect.width, 8, (Color){ 110, 190, 90, 255 });
+        DrawRectangle((int)s->rect.x, (int)s->rect.y, (int)s->rect.width, 8, (Color) { 110, 190, 90, 255 });
     }
 }
 
@@ -306,23 +447,23 @@ static void DrawSpike(Rectangle r)
         Vector2 p1 = { r.x + i * tw,           r.y + r.height };
         Vector2 p2 = { r.x + (i + 0.5f) * tw,  r.y };
         Vector2 p3 = { r.x + (i + 1) * tw,     r.y + r.height };
-        DrawTriangle(p1, p2, p3, (Color){ 190, 40, 40, 255 });
-        DrawTriangleLines(p1, p2, p3, (Color){ 90, 10, 10, 255 });
+        DrawTriangle(p1, p2, p3, (Color) { 190, 40, 40, 255 });
+        DrawTriangleLines(p1, p2, p3, (Color) { 90, 10, 10, 255 });
     }
 }
 
 static void DrawAnchor(Vector2 a, bool inRange)
 {
-    DrawCircleV(a, 9, inRange ? (Color){ 250, 210, 60, 255 } : (Color){ 90, 110, 170, 255 });
-    DrawCircleLines((int)a.x, (int)a.y, 9, (Color){ 20, 20, 30, 255 });
-    DrawCircleLines((int)a.x, (int)a.y, (int)GRAPPLE_RANGE, (Color){ 90, 110, 170, 40 });
+    DrawCircleV(a, 9, inRange ? (Color) { 250, 210, 60, 255 } : (Color) { 90, 110, 170, 255 });
+    DrawCircleLines((int)a.x, (int)a.y, 9, (Color) { 20, 20, 30, 255 });
+    DrawCircleLines((int)a.x, (int)a.y, (int)GRAPPLE_RANGE, (Color) { 90, 110, 170, 40 });
 }
 
-static void DrawPlayer(Player *p)
+static void DrawPlayer(Player* p)
 {
     Rectangle pr = PlayerRect(p->position);
-    DrawRectangleRec(pr, (Color){ 200, 60, 60, 255 });
-    DrawRectangleLinesEx(pr, 2, (Color){ 60, 10, 10, 255 });
+    DrawRectangleRec(pr, (Color) { 200, 60, 60, 255 });
+    DrawRectangleLinesEx(pr, 2, (Color) { 60, 10, 10, 255 });
     // eye to show facing
     float eyeX = pr.x + PLAYER_W * 0.5f + p->facing * 8.0f;
     DrawCircle((int)eyeX, (int)(pr.y + 14), 3, WHITE);
@@ -364,7 +505,7 @@ int main(void)
             // ---- Horizontal input / momentum ----
             float moveDir = 0.0f;
             if (IsKeyDown(KEY_RIGHT) || IsKeyDown(KEY_D)) moveDir += 1.0f;
-            if (IsKeyDown(KEY_LEFT)  || IsKeyDown(KEY_A)) moveDir -= 1.0f;
+            if (IsKeyDown(KEY_LEFT) || IsKeyDown(KEY_A)) moveDir -= 1.0f;
             if (moveDir != 0.0f) player.facing = moveDir;
 
             float accel = player.onGround ? GROUND_ACCEL : AIR_ACCEL;
@@ -432,13 +573,15 @@ int main(void)
         // ---- Camera ----
         camera.target = PlayerCenter(&player);
         float halfW = SCREEN_W / 2.0f;
+        float halfH = SCREEN_H / 2.0f;
         if (camera.target.x < halfW) camera.target.x = halfW;
         if (camera.target.x > worldWidth - halfW) camera.target.x = worldWidth - halfW;
-        camera.target.y = SCREEN_H / 2.0f; // fixed vertical camera keeps the level readable
+        if (camera.target.y < worldTopY + halfH) camera.target.y = worldTopY + halfH;
+        if (camera.target.y > worldBottomY - halfH) camera.target.y = worldBottomY - halfH;
 
         // ---- Draw ----
         BeginDrawing();
-        ClearBackground((Color){ 190, 220, 245, 255 });
+        ClearBackground((Color) { 190, 220, 245, 255 });
 
         BeginMode2D(camera);
 
@@ -453,15 +596,21 @@ int main(void)
         }
 
         // goal flag
-        DrawRectangleRec(goalRect, (Color){ 230, 230, 230, 255 });
-        DrawTriangle((Vector2){ goalRect.x + goalRect.width, goalRect.y },
-                     (Vector2){ goalRect.x + goalRect.width, goalRect.y + 22 },
-                     (Vector2){ goalRect.x + goalRect.width + 34, goalRect.y + 11 },
-                     (Color){ 60, 190, 90, 255 });
+        DrawRectangleRec(goalRect, (Color) { 230, 230, 230, 255 });
+        DrawTriangle((Vector2) { goalRect.x + goalRect.width, goalRect.y },
+            (Vector2) {
+            goalRect.x + goalRect.width, goalRect.y + 22
+        },
+            (Vector2) {
+            goalRect.x + goalRect.width + 34, goalRect.y + 11
+        },
+            (Color) {
+            60, 190, 90, 255
+        });
 
         if (player.grappling)
         {
-            DrawLineEx(PlayerCenter(&player), player.grappleAnchor, 2.5f, (Color){ 40, 40, 40, 255 });
+            DrawLineEx(PlayerCenter(&player), player.grappleAnchor, 2.5f, (Color) { 40, 40, 40, 255 });
         }
 
         DrawPlayer(&player);
@@ -469,18 +618,20 @@ int main(void)
         EndMode2D();
 
         // ---- HUD ----
-        DrawRectangle(0, 0, SCREEN_W, 64, Fade(BLACK, 0.35f));
+        DrawRectangle(0, 0, SCREEN_W, 84, Fade(BLACK, 0.35f));
         DrawText("A/D or Arrows: run   SPACE: jump   F / Left-Click: grapple nearest anchor",
-                 16, 8, 18, RAYWHITE);
+            16, 8, 18, RAYWHITE);
         DrawText("While grappling -> W/S or Up/Down: reel in/out    R: restart level",
-                 16, 32, 18, RAYWHITE);
+            16, 32, 18, RAYWHITE);
+        DrawText("Hit a wall hard enough and you'll bounce off it",
+            16, 56, 16, (Color) { 220, 220, 220, 255 });
 
         if (won)
         {
-            const char *msg = "LEVEL COMPLETE! Press R to play again.";
+            const char* msg = "LEVEL COMPLETE! Press R to play again.";
             int w = MeasureText(msg, 40);
-            DrawRectangle(SCREEN_W/2 - w/2 - 20, SCREEN_H/2 - 40, w + 40, 80, Fade(BLACK, 0.6f));
-            DrawText(msg, SCREEN_W/2 - w/2, SCREEN_H/2 - 20, 40, (Color){ 250, 220, 80, 255 });
+            DrawRectangle(SCREEN_W / 2 - w / 2 - 20, SCREEN_H / 2 - 40, w + 40, 80, Fade(BLACK, 0.6f));
+            DrawText(msg, SCREEN_W / 2 - w / 2, SCREEN_H / 2 - 20, 40, (Color) { 250, 220, 80, 255 });
         }
 
         DrawFPS(SCREEN_W - 90, SCREEN_H - 24);
