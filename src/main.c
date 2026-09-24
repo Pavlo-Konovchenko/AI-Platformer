@@ -46,6 +46,7 @@
 #define MAX_ANCHORS 12
 #define MAX_COINS   32
 #define MAX_PARTICLES 300
+#define LEVEL_COUNT 3
 
 //------------------------------------------------------------------------------------
 // Speed-feel / visual filters
@@ -58,7 +59,7 @@
 #define MOTION_TRAIL_COUNT   6
 #define MAX_STREAKS          80
 
-typedef enum { STATE_MENU, STATE_PLAYING } GameState;
+typedef enum { STATE_MENU, STATE_LEVEL_SELECT, STATE_PLAYING } GameState;
 
 typedef enum { SOLID_GROUND, SOLID_FLOATING, SOLID_WALL } SolidType;
 
@@ -150,7 +151,9 @@ static float shakeMagnitude = 0.0f;
 
 // Timer
 static float levelTime = 0.0f;
-static float bestTime = -1.0f;
+static float bestTimes[LEVEL_COUNT] = { -1.0f, -1.0f, -1.0f };
+static int currentLevel = 0;
+static const char *levelNames[LEVEL_COUNT] = { "Momentum Run", "Spike Alley", "Sky Islands" };
 
 // Sounds (generated procedurally, no external assets needed)
 static Sound sndJump, sndDoubleJump, sndLand, sndGrapple, sndWallBounce, sndCoin, sndWin, sndDeath;
@@ -318,10 +321,8 @@ static void Snd(Sound s) { if (audioReady) PlaySound(s); }
 // Coins are sprinkled along risky routes and grapple arcs as an optional
 // collect-em-all objective on top of just reaching the goal.
 //------------------------------------------------------------------------------------
-static void BuildLevel(void)
+static void BuildLevel1(void)
 {
-    solidCount = spikeCount = anchorCount = coinCount = 0;
-
     // --- Section 1: start, simple gap ---
     AddSolid(0, 650, 520, 100, SOLID_GROUND);
     AddCoin(260, 580);
@@ -398,6 +399,126 @@ static void BuildLevel(void)
     goalRect = (Rectangle){ 5760, 580, 40, 70 };
 
     spawnPoint = (Vector2){ 60, 650 - PLAYER_H };
+    worldWidth = 6000.0f;
+}
+
+// Level 2: a ground-heavy gauntlet. Spike runs, a wall that needs a double
+// jump (or the anchor above it), and pits sized for a double jump or swing.
+static void BuildLevel2(void)
+{
+    AddSolid(0, 650, 600, 100, SOLID_GROUND);
+    AddCoin(300, 580);
+
+    // Spike run
+    AddSolid(600, 650, 900, 100, SOLID_GROUND);
+    AddSpike(780, 630, 90, 20);
+    AddSpike(960, 630, 90, 20);
+    AddSpike(1140, 630, 90, 20);
+    AddSpike(1320, 630, 90, 20);
+    AddCoin(870, 540);
+    AddCoin(1050, 540);
+    AddCoin(1230, 540);
+
+    // Pit 1500 - 1760: swing across
+    AddAnchor(1630, 380);
+    AddCoin(1630, 500);
+    AddSolid(1760, 650, 760, 100, SOLID_GROUND);
+    AddSpike(1900, 630, 90, 20);
+    AddSpike(2080, 630, 90, 20);
+    AddCoin(1985, 560);
+
+    // Wall taller than a single jump: double jump, or swing off the anchor
+    AddSolid(2300, 480, 40, 170, SOLID_WALL);
+    AddAnchor(2320, 300);
+    AddCoin(2320, 400);
+
+    // Wide pit 2520 - 2860: double jump or chain the two anchors
+    AddAnchor(2620, 400);
+    AddAnchor(2780, 380);
+    AddCoin(2700, 470);
+    AddSolid(2860, 650, 840, 100, SOLID_GROUND);
+    AddSpike(3000, 630, 90, 20);
+    AddSpike(3180, 630, 90, 20);
+    AddSpike(3360, 630, 90, 20);
+    AddCoin(3090, 540);
+    AddCoin(3270, 540);
+
+    // Last pit 3700 - 3950
+    AddAnchor(3830, 400);
+    AddCoin(3830, 520);
+    AddSolid(3950, 650, 450, 100, SOLID_GROUND);
+    AddSpike(4080, 630, 90, 20);
+
+    goalRect = (Rectangle){ 4300, 580, 40, 70 };
+    spawnPoint = (Vector2){ 60, 650 - PLAYER_H };
+    worldWidth = 4500.0f;
+}
+
+// Level 3: floating islands over a bottomless drop. Every gap is crossable
+// with a double jump; the anchors are shortcuts and coin routes.
+static void BuildLevel3(void)
+{
+    AddSolid(0, 650, 420, 100, SOLID_GROUND);
+    AddCoin(200, 580);
+
+    // Rising staircase of islands
+    AddSolid(600, 600, 180, 30, SOLID_FLOATING);
+    AddCoin(690, 550);
+    AddSolid(960, 540, 180, 30, SOLID_FLOATING);
+    AddCoin(1050, 490);
+    AddSolid(1320, 470, 160, 30, SOLID_FLOATING);
+    AddAnchor(1150, 250);
+    AddCoin(1150, 330);
+
+    // 300 gap
+    AddAnchor(1630, 250);
+    AddSolid(1780, 470, 160, 30, SOLID_FLOATING);
+    AddCoin(1630, 350);
+
+    AddSolid(2150, 400, 160, 30, SOLID_FLOATING);
+    AddCoin(2230, 350);
+    AddSolid(2500, 330, 160, 30, SOLID_FLOATING);
+    AddSolid(2850, 260, 160, 30, SOLID_FLOATING);
+    AddCoin(2930, 210);
+
+    // Platform with a wall to clear (double jump, or swing over it)
+    AddSolid(3150, 260, 260, 30, SOLID_FLOATING);
+    AddSolid(3300, 100, 40, 160, SOLID_WALL);
+    AddAnchor(3320, 20);
+    AddCoin(3320, 60);
+
+    AddSolid(3600, 300, 160, 30, SOLID_FLOATING);
+    AddCoin(3680, 250);
+
+    // Long gap 3760 - 4200: chain the anchors (or a very good double jump)
+    AddAnchor(3900, 140);
+    AddAnchor(4080, 130);
+    AddCoin(3990, 260);
+    AddSolid(4200, 400, 180, 30, SOLID_FLOATING);
+
+    AddSolid(4560, 470, 160, 30, SOLID_FLOATING);
+    AddCoin(4640, 420);
+
+    // Home stretch
+    AddSolid(4900, 650, 700, 100, SOLID_GROUND);
+    AddSpike(5100, 630, 90, 20);
+    AddSpike(5280, 630, 90, 20);
+    AddCoin(5190, 560);
+
+    goalRect = (Rectangle){ 5500, 580, 40, 70 };
+    spawnPoint = (Vector2){ 60, 650 - PLAYER_H };
+    worldWidth = 5700.0f;
+}
+
+static void BuildLevel(int index)
+{
+    solidCount = spikeCount = anchorCount = coinCount = 0;
+    switch (index)
+    {
+        case 1:  BuildLevel2(); break;
+        case 2:  BuildLevel3(); break;
+        default: BuildLevel1(); break;
+    }
 }
 
 //------------------------------------------------------------------------------------
@@ -547,6 +668,76 @@ static void RespawnPlayer(Player* p)
     p->jumpBufferTimer = 0.0f;
     p->usedDoubleJump = false;
     p->scale = (Vector2){ 1.0f, 1.0f };
+}
+
+// Level-select previews: each level is drawn once into a small texture at
+// startup (world scaled to fit, key features enlarged so they stay readable).
+#define PREVIEW_W 456
+#define PREVIEW_H 128
+static RenderTexture2D levelPreviews[LEVEL_COUNT];
+
+static void BakeLevelPreview(int index)
+{
+    BuildLevel(index);
+
+    float minY = goalRect.y;
+    for (int i = 0; i < solidCount; i++) minY = fminf(minY, solids[i].rect.y);
+    for (int i = 0; i < anchorCount; i++) minY = fminf(minY, anchors[i].y);
+    for (int i = 0; i < coinCount; i++) minY = fminf(minY, coins[i].pos.y);
+    minY -= 40.0f;
+    float maxY = 720.0f;
+
+    float s = fminf((float)PREVIEW_W / worldWidth, (float)PREVIEW_H / (maxY - minY));
+    Camera2D cam = { 0 };
+    cam.offset = (Vector2){ PREVIEW_W / 2.0f, PREVIEW_H / 2.0f };
+    cam.target = (Vector2){ worldWidth / 2.0f, (minY + maxY) / 2.0f };
+    cam.zoom = s;
+
+    levelPreviews[index] = LoadRenderTexture(PREVIEW_W, PREVIEW_H);
+    SetTextureFilter(levelPreviews[index].texture, TEXTURE_FILTER_BILINEAR);
+
+    BeginTextureMode(levelPreviews[index]);
+    DrawRectangleGradientV(0, 0, PREVIEW_W, PREVIEW_H, (Color){ 150, 200, 240, 255 }, (Color){ 225, 240, 250, 255 });
+    BeginMode2D(cam);
+
+    for (int i = 0; i < solidCount; i++)
+    {
+        Color c;
+        switch (solids[i].type)
+        {
+            case SOLID_FLOATING: c = (Color){ 120, 160, 220, 255 }; break;
+            case SOLID_WALL:     c = (Color){ 90, 90, 100, 255 };  break;
+            default:             c = (Color){ 80, 130, 80, 255 };  break;
+        }
+        DrawRectangleRec(solids[i].rect, c);
+    }
+    for (int i = 0; i < spikeCount; i++)
+    {
+        Rectangle r = spikes[i];
+        DrawTriangle((Vector2){ r.x, r.y + r.height }, (Vector2){ r.x + r.width * 0.5f, r.y - 30.0f },
+                     (Vector2){ r.x + r.width, r.y + r.height }, (Color){ 190, 40, 40, 255 });
+    }
+    for (int i = 0; i < coinCount; i++) DrawCircleV(coins[i].pos, 26.0f, (Color){ 255, 215, 60, 255 });
+    for (int i = 0; i < anchorCount; i++) DrawCircleV(anchors[i], 30.0f, (Color){ 90, 110, 170, 255 });
+    DrawRectangle((int)goalRect.x - 10, (int)goalRect.y - 30, (int)goalRect.width + 60, (int)goalRect.height + 30, (Color){ 60, 190, 90, 255 });
+    DrawCircleV((Vector2){ spawnPoint.x + PLAYER_W * 0.5f, spawnPoint.y + PLAYER_H * 0.5f }, 34.0f, (Color){ 200, 60, 60, 255 });
+
+    EndMode2D();
+    EndTextureMode();
+}
+
+// Builds the given level and resets all per-run state (also used for restart).
+static void StartLevel(int index, Player* p)
+{
+    currentLevel = index;
+    BuildLevel(index);
+    RespawnPlayer(p);
+    p->facing = 1.0f;
+    coinsCollected = 0;
+    levelTime = 0.0f;
+    cameraSmooth = PlayerCenter(p);
+    speedIntensity = 0.0f;
+    displaySpeed = 0.0f;
 }
 
 //------------------------------------------------------------------------------------
@@ -944,6 +1135,43 @@ static void DrawButton(Rectangle rect, const char *label, int fontSize)
              (int)(r.y + r.height * 0.5f - fontSize * 0.5f), fontSize, border);
 }
 
+// A level-select card: big number, name, and best time. Grows when hovered.
+static void DrawLevelCard(Rectangle rect, int number, const char* name, float best, Texture2D preview)
+{
+    bool hovered = CheckCollisionPointRec(GetMousePosition(), rect);
+    Rectangle r = rect;
+    if (hovered)
+    {
+        r.x -= 6; r.y -= 6; r.width += 12; r.height += 12;
+    }
+
+    Color border = (Color){ 40, 40, 60, 255 };
+    Color bg = hovered ? (Color){ 250, 220, 120, 255 } : (Color){ 235, 235, 245, 255 };
+
+    DrawRectangleRounded((Rectangle){ r.x + 4, r.y + 6, r.width, r.height }, 0.12f, 8, Fade(BLACK, 0.25f));
+    DrawRectangleRounded(r, 0.12f, 8, bg);
+    DrawRectangleRoundedLinesEx(r, 0.12f, 8, 2.0f, border);
+
+    char num[8];
+    snprintf(num, sizeof(num), "%d", number);
+    int nw = MeasureText(num, 56);
+    DrawText(num, (int)(r.x + r.width * 0.5f - nw * 0.5f), (int)(r.y + 12), 56, border);
+
+    int lw = MeasureText(name, 24);
+    DrawText(name, (int)(r.x + r.width * 0.5f - lw * 0.5f), (int)(r.y + 74), 24, border);
+
+    Rectangle pv = { r.x + 16, r.y + 108, r.width - 32, (r.width - 32) * PREVIEW_H / PREVIEW_W };
+    DrawTexturePro(preview, (Rectangle){ 0, 0, (float)preview.width, -(float)preview.height }, pv,
+                   (Vector2){ 0, 0 }, 0.0f, WHITE);
+    DrawRectangleLinesEx(pv, 2.0f, border);
+
+    char bestText[32];
+    if (best > 0.0f) snprintf(bestText, sizeof(bestText), "Best: %05.2fs", best);
+    else snprintf(bestText, sizeof(bestText), "Best: --");
+    int bw = MeasureText(bestText, 18);
+    DrawText(bestText, (int)(r.x + r.width * 0.5f - bw * 0.5f), (int)(r.y + r.height - 32), 18, (Color){ 90, 90, 110, 255 });
+}
+
 // Deterministic twinkling starfield overlay (no particle/physics state needed).
 static void DrawTwinkleStars(float time)
 {
@@ -1042,15 +1270,14 @@ static void DrawPlayer(Player* p)
 int main(void)
 {
     InitWindow(SCREEN_W, SCREEN_H, "AI Platformer - Momentum & Grapple");
+    SetExitKey(KEY_NULL); // ESC is ours to use for menu navigation, not window close
     SetTargetFPS(60);
     InitGameAudio();
 
-    BuildLevel();
+    for (int i = 0; i < LEVEL_COUNT; i++) BakeLevelPreview(i);
 
     Player player = { 0 };
-    RespawnPlayer(&player);
-    player.facing = 1.0f;
-    coinsCollected = 0;
+    StartLevel(0, &player);
 
     Camera2D camera = { 0 };
     camera.offset = (Vector2){ SCREEN_W / 2.0f, SCREEN_H / 2.0f };
@@ -1065,6 +1292,16 @@ int main(void)
     float menuTime = 0.0f;
     bool playHoveredPrev = false;
     bool quitHoveredPrev = false;
+
+    // Level select layout: LEVEL_COUNT cards in a row, plus a back button
+    const float cardW = 260.0f, cardH = 210.0f, cardGap = 40.0f;
+    const float cardsX = (SCREEN_W - (LEVEL_COUNT * cardW + (LEVEL_COUNT - 1) * cardGap)) / 2.0f;
+    Rectangle levelCards[LEVEL_COUNT];
+    for (int i = 0; i < LEVEL_COUNT; i++)
+        levelCards[i] = (Rectangle){ cardsX + i * (cardW + cardGap), SCREEN_H / 2.0f - 90, cardW, cardH };
+    Rectangle backButton = { SCREEN_W / 2.0f - 110, SCREEN_H / 2.0f + 160, 220, 56 };
+    int hoveredCardPrev = -1;
+    bool backHoveredPrev = false;
 
     while (!WindowShouldClose() && !quitRequested)
     {
@@ -1085,19 +1322,14 @@ int main(void)
             quitHoveredPrev = quitHovered;
 
             bool startClicked = IsButtonClicked(playButton) || IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_SPACE);
-            bool quitClicked = IsButtonClicked(quitButton) || IsKeyPressed(KEY_ESCAPE);
+            bool quitClicked = IsButtonClicked(quitButton);
 
             if (startClicked)
             {
                 Snd(sndGrapple);
                 Vector2 btnCenter = { playButton.x + playButton.width * 0.5f, playButton.y + playButton.height * 0.5f };
                 SpawnBurst(btnCenter, 16, 200.0f, 0.5f, 3.5f, (Color){ 250, 220, 120, 255 });
-                state = STATE_PLAYING;
-                RespawnPlayer(&player);
-                won = false;
-                levelTime = 0.0f;
-                coinsCollected = 0;
-                for (int i = 0; i < coinCount; i++) coins[i].collected = false;
+                state = STATE_LEVEL_SELECT;
             }
             if (quitClicked) quitRequested = true;
 
@@ -1124,31 +1356,88 @@ int main(void)
             DrawParticles();
 
             const char *controls1 = "A/D or Arrows: run   SPACE: jump (double-jump in air!)   F / Click: grapple";
-            const char *controls2 = "While grappling -> W/S or Up/Down: reel in/out    R: restart level";
+            const char *controls2 = "While grappling -> W/S or Up/Down: reel in/out    R: restart    ESC: level select";
             int cw1 = MeasureText(controls1, 16);
             int cw2 = MeasureText(controls2, 16);
             DrawText(controls1, SCREEN_W / 2 - cw1 / 2, SCREEN_H / 2 + 120, 16, (Color){ 230, 230, 235, 255 });
             DrawText(controls2, SCREEN_W / 2 - cw2 / 2, SCREEN_H / 2 + 144, 16, (Color){ 230, 230, 235, 255 });
 
-            if (bestTime > 0.0f)
-            {
-                char best[64];
-                snprintf(best, sizeof(best), "Best time: %05.2fs", bestTime);
-                int bw = MeasureText(best, 20);
-                DrawText(best, SCREEN_W / 2 - bw / 2, SCREEN_H / 2 + 180, 20, (Color){ 250, 220, 120, 255 });
-            }
-
             EndDrawing();
             continue;
         }
 
+        if (state == STATE_LEVEL_SELECT)
+        {
+            menuTime += dt;
+            camera.target.x = menuTime * 35.0f;
+
+            int hoveredCard = -1;
+            for (int i = 0; i < LEVEL_COUNT; i++)
+                if (CheckCollisionPointRec(GetMousePosition(), levelCards[i])) hoveredCard = i;
+            bool backHovered = CheckCollisionPointRec(GetMousePosition(), backButton);
+            if ((hoveredCard >= 0 && hoveredCard != hoveredCardPrev) || (backHovered && !backHoveredPrev)) Snd(sndCoin);
+            hoveredCardPrev = hoveredCard;
+            backHoveredPrev = backHovered;
+
+            int chosen = -1;
+            if (hoveredCard >= 0 && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) chosen = hoveredCard;
+            for (int i = 0; i < LEVEL_COUNT; i++)
+                if (IsKeyPressed(KEY_ONE + i)) chosen = i;
+
+            if (chosen >= 0)
+            {
+                Snd(sndGrapple);
+                StartLevel(chosen, &player);
+                won = false;
+                state = STATE_PLAYING;
+            }
+            else if (IsButtonClicked(backButton) || IsKeyPressed(KEY_ESCAPE))
+            {
+                state = STATE_MENU;
+            }
+
+            UpdateParticles(dt);
+
+            BeginDrawing();
+            ClearBackground((Color){ 190, 220, 245, 255 });
+            DrawParallaxBackground(camera);
+            DrawTwinkleStars(menuTime);
+
+            Rectangle panel = { SCREEN_W / 2.0f - 500, SCREEN_H / 2.0f - 250, 1000, 520 };
+            DrawRectangleRounded(panel, 0.06f, 12, Fade(BLACK, 0.22f));
+
+            const char *title = "SELECT LEVEL";
+            int tw = MeasureText(title, 56);
+            float titleY = SCREEN_H / 2.0f - 200.0f + sinf(menuTime * 1.6f) * 4.0f;
+            DrawText(title, SCREEN_W / 2 - tw / 2 + 3, (int)titleY + 3, 56, Fade(BLACK, 0.35f));
+            DrawText(title, SCREEN_W / 2 - tw / 2, (int)titleY, 56, (Color){ 255, 236, 160, 255 });
+
+            for (int i = 0; i < LEVEL_COUNT; i++)
+                DrawLevelCard(levelCards[i], i + 1, levelNames[i], bestTimes[i], levelPreviews[i].texture);
+            DrawButton(backButton, "BACK", 26);
+
+            const char *hint = "Click a level or press 1-3    ESC: back";
+            int hw = MeasureText(hint, 16);
+            DrawText(hint, SCREEN_W / 2 - hw / 2, SCREEN_H / 2 + 235, 16, (Color){ 230, 230, 235, 255 });
+
+            DrawParticles();
+            EndDrawing();
+            continue;
+        }
+
+        if (IsKeyPressed(KEY_ESCAPE))
+        {
+            // Leave the level back to the level select screen. Falls through
+            // so this frame still finishes its EndDrawing (which polls input);
+            // skipping it would leave ESC "pressed" for the next screen.
+            state = STATE_LEVEL_SELECT;
+            hoveredCardPrev = -1;
+        }
+
         if (IsKeyPressed(KEY_R))
         {
-            RespawnPlayer(&player);
+            StartLevel(currentLevel, &player);
             won = false;
-            levelTime = 0.0f;
-            coinsCollected = 0;
-            for (int i = 0; i < coinCount; i++) coins[i].collected = false;
         }
 
         if (!won)
@@ -1275,7 +1564,8 @@ int main(void)
                 Snd(sndWin);
                 Shake(10.0f, 0.3f);
                 SpawnBurst(PlayerCenter(&player), 40, 260.0f, 0.8f, 4.5f, (Color) { 255, 220, 90, 255 });
-                if (bestTime < 0.0f || levelTime < bestTime) bestTime = levelTime;
+                if (bestTimes[currentLevel] < 0.0f || levelTime < bestTimes[currentLevel])
+                    bestTimes[currentLevel] = levelTime;
             }
         }
 
@@ -1415,7 +1705,7 @@ int main(void)
         DrawRectangle(0, 0, SCREEN_W, 84, Fade(BLACK, 0.35f));
         DrawText("A/D or Arrows: run   SPACE: jump (double-jump in air!)   F / Click: grapple",
             16, 8, 18, RAYWHITE);
-        DrawText("While grappling -> W/S or Up/Down: reel in/out    R: restart level",
+        DrawText("While grappling -> W/S or Up/Down: reel in/out    R: restart    ESC: level select",
             16, 32, 18, RAYWHITE);
         DrawText("Hit a wall hard enough and you'll bounce off it",
             16, 56, 16, (Color) { 220, 220, 220, 255 });
@@ -1495,17 +1785,17 @@ int main(void)
             // "SPEED" label on the side
             DrawText("SPEED", (int)(barX - 56), (int)(barY - 4), 14, Fade(WHITE, 0.6f));
         }
-        if (bestTime > 0.0f)
+        if (bestTimes[currentLevel] > 0.0f)
         {
             char best[64];
-            snprintf(best, sizeof(best), "Best: %05.2fs", bestTime);
+            snprintf(best, sizeof(best), "Best: %05.2fs", bestTimes[currentLevel]);
             int bw = MeasureText(best, 18);
             DrawText(best, SCREEN_W - bw - 16, 38, 18, (Color) { 200, 220, 255, 255 });
         }
 
         if (won)
         {
-            const char* msg = "LEVEL COMPLETE! Press R to play again.";
+            const char* msg = "LEVEL COMPLETE!  R: replay   ESC: level select";
             int w = MeasureText(msg, 40);
             DrawRectangle(SCREEN_W / 2 - w / 2 - 20, SCREEN_H / 2 - 50, w + 40, 100, Fade(BLACK, 0.6f));
             DrawText(msg, SCREEN_W / 2 - w / 2, SCREEN_H / 2 - 30, 40, (Color) { 250, 220, 80, 255 });
@@ -1520,6 +1810,7 @@ int main(void)
         EndDrawing();
     }
 
+    for (int i = 0; i < LEVEL_COUNT; i++) UnloadRenderTexture(levelPreviews[i]);
     ShutdownGameAudio();
     CloseWindow();
     return 0;
