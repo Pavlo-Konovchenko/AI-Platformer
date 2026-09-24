@@ -795,7 +795,9 @@ static bool ReelBlockedByWall(Player* p)
     return false;
 }
 
-static void TryFireGrapple(Player* p)
+// The anchor a grapple shot would attach to right now (nearest within range),
+// or -1. Shared by firing and the aim indicator so they always agree.
+static int FindBestAnchor(Player* p)
 {
     Vector2 center = PlayerCenter(p);
     int best = -1;
@@ -809,6 +811,13 @@ static void TryFireGrapple(Player* p)
             best = i;
         }
     }
+    return best;
+}
+
+static void TryFireGrapple(Player* p)
+{
+    Vector2 center = PlayerCenter(p);
+    int best = FindBestAnchor(p);
     if (best >= 0)
     {
         p->grappling = true;
@@ -1236,6 +1245,17 @@ static void DrawSpike(Rectangle r)
         DrawTriangle(p1, p2, p3, (Color) { 190, 40, 40, 255 });
         DrawTriangleLines(p1, p2, p3, (Color) { 90, 10, 10, 255 });
     }
+}
+
+// Dots marching from a toward b, so the aim line reads as "pulling toward" the target.
+static void DrawDottedLine(Vector2 a, Vector2 b, float time, Color color)
+{
+    const float spacing = 16.0f;
+    float dist = Vector2Distance(a, b);
+    if (dist < 1.0f) return;
+    Vector2 dir = Vector2Scale(Vector2Subtract(b, a), 1.0f / dist);
+    for (float d = fmodf(time * 40.0f, spacing); d < dist; d += spacing)
+        DrawCircleV(Vector2Add(a, Vector2Scale(dir, d)), 2.5f, color);
 }
 
 static void DrawAnchor(Vector2 a, bool inRange)
@@ -1733,6 +1753,13 @@ int main(void)
         if (player.grappling)
         {
             DrawLineEx(PlayerCenter(&player), player.grappleAnchor, 2.5f, (Color) { 40, 40, 40, 255 });
+        }
+        else
+        {
+            // Aim indicator: dotted line to the anchor a click would hook.
+            int aimed = FindBestAnchor(&player);
+            if (aimed >= 0)
+                DrawDottedLine(PlayerCenter(&player), anchors[aimed], (float)GetTime(), (Color) { 70, 220, 255, 220 });
         }
 
         DrawParticles();
