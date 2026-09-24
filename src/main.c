@@ -817,7 +817,7 @@ static void TryFireGrapple(Player* p)
         p->ropeDirValid = false;
         p->usedDoubleJump = false; // grappling refreshes the double jump for extra chaining fun
         Snd(sndGrapple);
-        SpawnBurst(anchors[best], 10, 160.0f, 0.4f, 3.0f, (Color) { 250, 210, 60, 255 });
+        SpawnBurst(anchors[best], 10, 160.0f, 0.4f, 3.0f, (Color) { 70, 220, 255, 255 });
     }
 }
 
@@ -1240,8 +1240,16 @@ static void DrawSpike(Rectangle r)
 
 static void DrawAnchor(Vector2 a, bool inRange)
 {
-    DrawCircleV(a, 9, inRange ? (Color) { 250, 210, 60, 255 } : (Color) { 90, 110, 170, 255 });
-    DrawCircleLines((int)a.x, (int)a.y, 9, (Color) { 20, 20, 30, 255 });
+    // Hollow targeting ring + crosshair in cyan/slate, so anchors can't be
+    // mistaken for the solid gold coins.
+    Color c = inRange ? (Color) { 70, 220, 255, 255 } : (Color) { 90, 110, 170, 255 };
+    DrawCircleV(a, 12, (Color) { 25, 35, 65, 255 });
+    DrawRing(a, 9, 12, 0, 360, 24, c);
+    DrawCircleV(a, 3.5f, c);
+    DrawLineEx((Vector2) { a.x - 18, a.y }, (Vector2) { a.x - 8, a.y }, 2, c);
+    DrawLineEx((Vector2) { a.x + 8, a.y }, (Vector2) { a.x + 18, a.y }, 2, c);
+    DrawLineEx((Vector2) { a.x, a.y - 18 }, (Vector2) { a.x, a.y - 8 }, 2, c);
+    DrawLineEx((Vector2) { a.x, a.y + 8 }, (Vector2) { a.x, a.y + 18 }, 2, c);
     DrawCircleLines((int)a.x, (int)a.y, (int)GRAPPLE_RANGE, (Color) { 90, 110, 170, 40 });
 }
 
