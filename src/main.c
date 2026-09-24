@@ -1233,6 +1233,102 @@ static void RespawnPlayer(Player* p)
     p->scale = (Vector2){ 1.0f, 1.0f };
 }
 
+//------------------------------------------------------------------------------------
+// Ghost replay: the current run is sampled at a fixed rate; when a run sets a
+// personal best, that recording becomes the level's ghost and is played back
+// (in sync with the run timer) on later attempts.
+//------------------------------------------------------------------------------------
+#define GHOST_HZ            60.0f
+#define GHOST_MAX_SAMPLES   54000   // 15 minutes; longer runs simply don't record a ghost
+
+typedef struct {
+    Vector2 pos;      // player top-left
+    Vector2 anchor;   // grapple anchor (valid when grappling)
+    float facing;
+    bool grappling;
+} GhostSample;
+
+typedef struct {
+    GhostSample* samples;
+    int count, cap;
+} GhostTrack;
+
+static GhostTrack recordingTrack;              // the run in progress
+static bool recordingOverflow = false;         // run too long to keep
+static GhostTrack ghostTracks[LEVEL_COUNT];    // best run per level
+
+static void RecordingReset(void)
+{
+    recordingTrack.count = 0;
+    recordingOverflow = false;
+}
+
+// Pushes one sample per elapsed 1/GHOST_HZ of run time, so playback doesn't
+// depend on the frame rate the run was recorded at.
+static void RecordGhost(Player* p)
+{
+    int target = (int)(levelTime * GHOST_HZ);
+    while (recordingTrack.count <= target)
+    {
+        if (recordingTrack.count >= GHOST_MAX_SAMPLES) { recordingOverflow = true; return; }
+        if (recordingTrack.count >= recordingTrack.cap)
+        {
+            int newCap = recordingTrack.cap ? recordingTrack.cap * 2 : 2048;
+            GhostSample* grown = realloc(recordingTrack.samples, newCap * sizeof(GhostSample));
+            if (!grown) { recordingOverflow = true; return; }
+            recordingTrack.samples = grown;
+            recordingTrack.cap = newCap;
+        }
+        recordingTrack.samples[recordingTrack.count++] = (GhostSample){
+            p->position, p->grappleAnchor, p->facing, p->grappling
+        };
+    }
+}
+
+static void SaveGhost(int level)
+{
+    if (recordingOverflow || recordingTrack.count < 2) return;
+    GhostSample* copy = malloc(recordingTrack.count * sizeof(GhostSample));
+    if (!copy) return;
+    memcpy(copy, recordingTrack.samples, recordingTrack.count * sizeof(GhostSample));
+    free(ghostTracks[level].samples);
+    ghostTracks[level].samples = copy;
+    ghostTracks[level].count = ghostTracks[level].cap = recordingTrack.count;
+}
+
+static void DrawGhost(int level, float t)
+{
+    GhostTrack* g = &ghostTracks[level];
+    if (g->count < 2) return;
+
+    float f = t * GHOST_HZ;
+    int i = (int)f;
+    GhostSample s;
+    if (i >= g->count - 1)
+    {
+        s = g->samples[g->count - 1];
+    }
+    else
+    {
+        GhostSample a = g->samples[i], b = g->samples[i + 1];
+        float k = f - (float)i;
+        s = a;
+        s.pos = Vector2Lerp(a.pos, b.pos, k);
+        s.anchor = Vector2Lerp(a.anchor, b.anchor, k);
+    }
+
+    Color body = (Color){ 130, 210, 255, 110 };
+    Color edge = (Color){ 40, 110, 170, 150 };
+    if (s.grappling)
+        DrawLineEx((Vector2){ s.pos.x + PLAYER_W * 0.5f, s.pos.y + PLAYER_H * 0.5f }, s.anchor, 1.5f, (Color){ 130, 210, 255, 90 });
+    Rectangle r = { s.pos.x, s.pos.y, PLAYER_W, PLAYER_H };
+    DrawRectangleRec(r, body);
+    DrawRectangleLinesEx(r, 2, edge);
+    DrawCircle((int)(r.x + PLAYER_W * 0.5f + s.facing * 8.0f), (int)(r.y + 14), 3, (Color){ 255, 255, 255, 170 });
+    const char* tag = "PB";
+    DrawText(tag, (int)(r.x + PLAYER_W * 0.5f - MeasureText(tag, 12) * 0.5f), (int)r.y - 16, 12, (Color){ 130, 210, 255, 220 });
+}
+
 // Level-select previews: each level is drawn once into a small texture at
 // startup (world scaled to fit, key features enlarged so they stay readable).
 #define PREVIEW_W 456
@@ -1310,6 +1406,7 @@ static void StartLevel(int index, Player* p)
     p->facing = 1.0f;
     coinsCollected = 0;
     levelTime = 0.0f;
+    RecordingReset();
     cameraSmooth = PlayerCenter(p);
     speedIntensity = 0.0f;
     displaySpeed = 0.0f;
@@ -2190,20 +2287,23 @@ int main(void)
                 Snd(sndDeath);
                 Shake(8.0f, 0.2f);
                 SpawnBurst(PlayerCenter(&player), 16, 220.0f, 0.5f, 4.0f, (Color) { 220, 40, 40, 255 });
-                RespawnPlayer(&player);
+                StartLevel(currentLevel, &player); // dying restarts the run: timer, coins, ghost recording
             }
             if (TouchesAnyEnemy(&player))
             {
                 Snd(sndDeath);
                 Shake(8.0f, 0.2f);
                 SpawnBurst(PlayerCenter(&player), 16, 220.0f, 0.5f, 4.0f, (Color) { 150, 50, 170, 255 });
-                RespawnPlayer(&player);
+                StartLevel(currentLevel, &player);
             }
             if (player.position.y > WORLD_DEATH_Y)
             {
                 Snd(sndDeath);
-                RespawnPlayer(&player);
+                StartLevel(currentLevel, &player);
             }
+
+            // ---- Ghost recording ----
+            RecordGhost(&player);
 
             // ---- Goal ----
             if (CheckCollisionRecs(PlayerRect(player.position), goalRect))
@@ -2213,7 +2313,10 @@ int main(void)
                 Shake(10.0f, 0.3f);
                 SpawnBurst(PlayerCenter(&player), 40, 260.0f, 0.8f, 4.5f, (Color) { 255, 220, 90, 255 });
                 if (bestTimes[currentLevel] < 0.0f || levelTime < bestTimes[currentLevel])
+                {
                     bestTimes[currentLevel] = levelTime;
+                    SaveGhost(currentLevel); // new personal best: this run becomes the ghost
+                }
             }
         }
 
@@ -2345,6 +2448,7 @@ int main(void)
         }
 
         DrawParticles();
+        DrawGhost(currentLevel, levelTime);
         DrawPlayer(&player);
 
         EndMode2D();
@@ -2467,6 +2571,8 @@ int main(void)
     }
 
     for (int i = 0; i < LEVEL_COUNT; i++) UnloadRenderTexture(levelPreviews[i]);
+    for (int i = 0; i < LEVEL_COUNT; i++) free(ghostTracks[i].samples);
+    free(recordingTrack.samples);
     ShutdownGameAudio();
     CloseWindow();
     return 0;
