@@ -82,6 +82,11 @@ typedef struct {
     float jumpBufferTimer;
     bool  usedDoubleJump;
     Vector2 scale;       // squash & stretch, lerps toward (1,1)
+
+    // Direction anchor->player from the last taut-rope frame, so velocity can
+    // be rotated along with the swing instead of leaking speed each frame.
+    Vector2 ropeDir;
+    bool    ropeDirValid;
 } Player;
 
 typedef struct {
@@ -809,6 +814,7 @@ static void TryFireGrapple(Player* p)
         p->grappling = true;
         p->grappleAnchor = anchors[best];
         p->ropeLength = fmaxf(Vector2Distance(center, anchors[best]), GRAPPLE_MIN_LEN);
+        p->ropeDirValid = false;
         p->usedDoubleJump = false; // grappling refreshes the double jump for extra chaining fun
         Snd(sndGrapple);
         SpawnBurst(anchors[best], 10, 160.0f, 0.4f, 3.0f, (Color) { 250, 210, 60, 255 });
@@ -839,6 +845,13 @@ static void UpdateGrapple(Player* p, float dt)
     {
         Vector2 dir = Vector2Normalize(diff);
 
+        // The player moved in a straight line this frame, so the rope direction
+        // turned by some angle. Turn the velocity by the same angle first;
+        // otherwise removing the "outward" part below deletes real speed every
+        // frame (worst on short ropes and low frame rates).
+        if (p->ropeDirValid)
+            p->velocity = Vector2Rotate(p->velocity, Vector2Angle(p->ropeDir, dir));
+
         // Snap back onto the rope circle
         Vector2 newCenter = Vector2Add(p->grappleAnchor, Vector2Scale(dir, p->ropeLength));
         p->position.x = newCenter.x - PLAYER_W * 0.5f;
@@ -856,6 +869,14 @@ static void UpdateGrapple(Player* p, float dt)
         float tangentSpeed = Vector2DotProduct(p->velocity, tangent);
         float sign = (tangentSpeed >= 0) ? 1.0f : -1.0f;
         p->velocity = Vector2Add(p->velocity, Vector2Scale(tangent, sign * GRAPPLE_PULL_ACC * dt * 0.15f));
+
+        p->ropeDir = dir;
+        p->ropeDirValid = true;
+    }
+    else
+    {
+        // Slack rope: free flight, so the last direction no longer applies.
+        p->ropeDirValid = false;
     }
 
     // A steady trail of little sparks along the rope makes the swing read
@@ -1455,13 +1476,30 @@ int main(void)
 
             if (moveDir != 0.0f)
             {
-                player.velocity.x += moveDir * accel * dt;
-                // Only clamp when input is actively pushing past the cap;
-                // momentum from swings/falls can still exceed this.
-                if (!player.grappling)
+                float vx = player.velocity.x;
+                if (player.grappling)
                 {
-                    player.velocity.x = Clamp(player.velocity.x, -MAX_RUN_SPEED, MAX_RUN_SPEED);
+                    // Pumping the swing: no run-speed cap while hooked.
+                    player.velocity.x += moveDir * accel * dt;
                 }
+                else if (fabsf(vx) <= MAX_RUN_SPEED)
+                {
+                    // Normal running: accelerate up to the cap, never past it.
+                    player.velocity.x = Clamp(vx + moveDir * accel * dt, -MAX_RUN_SPEED, MAX_RUN_SPEED);
+                }
+                else if (vx * moveDir < 0.0f)
+                {
+                    // Above the cap but pushing against momentum: braking is allowed.
+                    player.velocity.x += moveDir * accel * dt;
+                }
+                else if (player.onGround)
+                {
+                    // Above the cap on the ground while pushing the same way:
+                    // ease back down to the cap instead of snapping to it.
+                    player.velocity.x = copysignf(fmaxf(fabsf(vx) - friction * dt, MAX_RUN_SPEED), vx);
+                }
+                // else: airborne above the cap, pushing the same way -- keep the
+                // momentum (no extra acceleration, no clamp).
                 // occasional running dust while grounded and moving fast
                 if (player.onGround && GetRandomValue(0, 100) < 12)
                 {
@@ -1469,8 +1507,9 @@ int main(void)
                     SpawnParticle(feet, (Vector2) { -moveDir * 40.0f, -30.0f }, 0.3f, 2.5f, (Color) { 210, 200, 170, 200 });
                 }
             }
-            else
+            else if (!(player.grappling && !player.onGround))
             {
+                // No air friction while hooked: swing momentum should carry.
                 if (player.velocity.x > 0.0f)
                 {
                     player.velocity.x -= friction * dt;
@@ -1516,7 +1555,7 @@ int main(void)
                 SpawnBurst(PlayerCenter(&player), 14, 160.0f, 0.35f, 3.0f, (Color) { 180, 220, 255, 255 });
             }
 
-            if (IsKeyReleased(KEY_SPACE) && player.velocity.y < 0.0f)
+            if (IsKeyReleased(KEY_SPACE) && player.velocity.y < 0.0f && !player.grappling)
             {
                 player.velocity.y *= JUMP_CUT_MULT;
             }
@@ -1530,7 +1569,7 @@ int main(void)
 
             // ---- Gravity ----
             player.velocity.y += GRAVITY * dt;
-            player.velocity.y = fminf(player.velocity.y, MAX_FALL_SPEED);
+            if (!player.grappling) player.velocity.y = fminf(player.velocity.y, MAX_FALL_SPEED);
 
             // ---- Physics step ----
             MoveAndCollide(&player, dt);
