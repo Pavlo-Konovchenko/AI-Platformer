@@ -22,9 +22,9 @@
 
 #define JUMP_VELOCITY     -640.0f
 #define DOUBLE_JUMP_VELOCITY -560.0f
-#define JUMP_CUT_MULT     0.45f    // short-hop when space released early
-#define COYOTE_TIME       0.10f    // grace period to jump after walking off a ledge
-#define JUMP_BUFFER_TIME  0.12f    // grace period for a jump press just before landing
+#define JUMP_CUT_MULT     0.45f
+#define COYOTE_TIME       0.10f
+#define JUMP_BUFFER_TIME  0.12f
 
 #define PLAYER_W 30.0f
 #define PLAYER_H 44.0f
@@ -32,14 +32,12 @@
 #define GRAPPLE_RANGE     620.0f
 #define GRAPPLE_MIN_LEN   70.0f
 #define GRAPPLE_REEL_SPD  260.0f
-#define GRAPPLE_PULL_ACC  1800.0f  // swing-in assist toward tangential motion
+#define GRAPPLE_PULL_ACC  1800.0f
 
-// Wall-bounce: hitting a SOLID_WALL above this speed reflects velocity
-// instead of just stopping it dead.
 #define WALL_BOUNCE_SPEED_THRESHOLD  480.0f
-#define WALL_BOUNCE_RESTITUTION      0.55f   // fraction of speed kept after bounce
+#define WALL_BOUNCE_RESTITUTION      0.55f
 
-#define WORLD_DEATH_Y     1400.0f  // fall past this -> respawn (pit)
+#define WORLD_DEATH_Y     1400.0f
 
 #define MAX_SOLIDS  140
 #define MAX_SPIKES  60
@@ -47,45 +45,67 @@
 #define MAX_COINS   100
 #define MAX_ENEMIES 60
 #define MAX_PARTICLES 300
-#define LEVEL_COUNT 4
+#define LEVEL_COUNT 5
+#define CUSTOM_LEVEL_INDEX (-1)
 
-//------------------------------------------------------------------------------------
-// Speed-feel / visual filters
-//------------------------------------------------------------------------------------
-#define MPH_SCALE            12.0f    // world units/sec -> "MPH" display scale
-#define CAMERA_LEAD_FACTOR   0.35f    // how much camera leads in movement direction
-#define CAMERA_LAG_SPEED     6.0f     // how quickly camera catches up
-#define SPEED_BLUR_MIN       300.0f   // speed at which effects start
-#define SPEED_BLUR_MAX       900.0f   // speed at which effects are maxed
+#define MPH_SCALE            12.0f
+#define CAMERA_LEAD_FACTOR   0.35f
+#define CAMERA_LAG_SPEED     6.0f
+#define SPEED_BLUR_MIN       300.0f
+#define SPEED_BLUR_MAX       900.0f
 #define MOTION_TRAIL_COUNT   6
 #define MAX_STREAKS          80
 
-typedef enum { STATE_MENU, STATE_LEVEL_SELECT, STATE_PLAYING } GameState;
+typedef enum { STATE_MENU, STATE_LEVEL_SELECT, STATE_PLAYING, STATE_EDITOR } GameState;
 
-typedef enum { SOLID_GROUND, SOLID_FLOATING, SOLID_WALL } SolidType;
+typedef enum {
+    TOOL_GROUND, TOOL_FLOATING, TOOL_WALL, TOOL_SPIKE, TOOL_ANCHOR,
+    TOOL_COIN, TOOL_ENEMY, TOOL_GOAL, TOOL_SPAWN
+} EditorTool;
+#define NUM_EDITOR_TOOLS 9
+
+typedef enum {
+    SOLID_GROUND, SOLID_FLOATING, SOLID_WALL,
+    SOLID_MOVING, SOLID_BREAKABLE, SOLID_PHASING
+} SolidType;
 
 typedef struct {
     Rectangle rect;
     SolidType type;
+
+    Vector2 moveOrigin;
+    Vector2 moveVec;
+    float   moveSpeed;
+    float   movePhase;
+    float   moveDir;
+    Vector2 velocity;
+
+    float breakTimer;
+    float breakDelay;
+    bool  broken;
+    float respawnTimer;
+
+    float phaseTimer;
+    float phaseOnTime;
+    float phaseOffTime;
+    float phaseOffset;
+    bool  phasedOut;
 } Solid;
 
 typedef struct {
-    Vector2 position;   // top-left
+    Vector2 position;
     Vector2 velocity;
     bool onGround;
     bool grappling;
     Vector2 grappleAnchor;
     float ropeLength;
-    float facing;       // -1 left, 1 right
+    float facing;
 
-    // Juice / feel
     float coyoteTimer;
     float jumpBufferTimer;
     bool  usedDoubleJump;
-    Vector2 scale;       // squash & stretch, lerps toward (1,1)
+    Vector2 scale;
 
-    // Direction anchor->player from the last taut-rope frame, so velocity can
-    // be rotated along with the swing instead of leaking speed each frame.
     Vector2 ropeDir;
     bool    ropeDirValid;
 } Player;
@@ -102,19 +122,18 @@ typedef struct {
 typedef struct {
     Vector2 pos;
     bool collected;
-    float bob; // animation phase
+    float bob;
 } Coin;
 
 #define ENEMY_W 30.0f
 #define ENEMY_H 26.0f
 typedef struct {
-    Vector2 pos;   // feet position (bottom-center), sits on the ground it patrols
+    Vector2 pos;
     float minX, maxX;
     float speed;
-    float dir;     // -1 or 1
+    float dir;
 } Enemy;
 
-// Speed visual effects
 typedef struct {
     Vector2 pos;
     float life, maxLife;
@@ -125,7 +144,6 @@ typedef struct {
 
 static SpeedStreak streaks[MAX_STREAKS];
 
-// Motion trail for player
 typedef struct {
     Vector2 pos;
     float life;
@@ -137,11 +155,10 @@ typedef struct {
 static TrailGhost trailGhosts[MOTION_TRAIL_COUNT];
 static float trailTimer = 0.0f;
 
-// Camera smoothing
 static Vector2 cameraSmooth = { 0 };
 static Vector2 cameraVel = { 0 };
-static float speedIntensity = 0.0f;  // 0..1 normalized speed factor
-static float displaySpeed = 0.0f;    // smoothed speed for MPH display
+static float speedIntensity = 0.0f;
+static float displaySpeed = 0.0f;
 
 static Solid   solids[MAX_SOLIDS];
 static int     solidCount = 0;
@@ -157,30 +174,157 @@ static int     enemyCount = 0;
 static Rectangle goalRect;
 static Vector2 spawnPoint;
 static float   worldWidth = 6000.0f;
-static float   worldTopY = -60.0f;   // highest point the camera should show
-static float   worldBottomY = 1000.0f; // lowest point the camera should show
+static float   worldTopY = -60.0f;
+static float   worldBottomY = 1000.0f;
 
 static Particle particles[MAX_PARTICLES];
 
-// Screen shake
 static float shakeTime = 0.0f;
 static float shakeMagnitude = 0.0f;
 
-// Timer
 static float levelTime = 0.0f;
-static float bestTimes[LEVEL_COUNT] = { -1.0f, -1.0f, -1.0f, -1.0f };
+static float bestTimes[LEVEL_COUNT] = { -1.0f, -1.0f, -1.0f, -1.0f, -1.0f };
 static int currentLevel = 0;
-static const char *levelNames[LEVEL_COUNT] = { "Momentum Run", "Spike Alley", "Sky Islands", "Twin Lanes" };
+static const char* levelNames[LEVEL_COUNT] = {
+    "Momentum Run", "Spike Alley", "Sky Islands", "Twin Lanes", "Clockwork Spire"
+};
 
-// Sounds (generated procedurally, no external assets needed)
+//------------------------------------------------------------------------------------
+// Background theme + per-level solid palette
+//------------------------------------------------------------------------------------
+typedef enum {
+    BG_DEFAULT,   // level 1 - green meadows
+    BG_CAVERN,    // level 2 - red rock / lava cavern
+    BG_SKY,       // level 3 - floating islands, blue sky + clouds
+    BG_CITY,      // level 4 - dusk city skyline
+    BG_TOWER,     // level 5 - brass clocktower
+    BG_EDITOR     // editor - neutral grid
+} BackgroundTheme;
+
+static BackgroundTheme currentBgTheme = BG_DEFAULT;
+
+// A small colour scheme for the six solid types so each level reads as its
+// own material: grass, sandstone, cloudstone, ice, brass, etc.
+typedef struct {
+    Color ground;
+    Color floating;
+    Color wall;
+    Color moving;
+    Color breakable;
+    Color phasing;
+    Color groundTop;   // the top "cap" stripe on ground tiles
+} SolidPalette;
+
+static const SolidPalette paletteMeadow = {
+    {  80, 130,  80, 255 }, { 120, 160, 220, 255 }, {  90,  90, 100, 255 },
+    {  80, 180, 200, 255 }, { 190, 140,  80, 255 }, { 170, 110, 220, 255 },
+    { 110, 190,  90, 255 }
+};
+static const SolidPalette paletteCavern = {
+    { 118,  58,  44, 255 }, { 158,  86,  60, 255 }, {  70,  40,  34, 255 },
+    { 190, 110,  60, 255 }, { 210, 140,  70, 255 }, { 200,  80,  70, 255 },
+    { 190, 100,  60, 255 }
+};
+static const SolidPalette paletteSky = {
+    { 200, 214, 232, 255 }, { 178, 200, 228, 255 }, { 128, 140, 170, 255 },
+    { 140, 210, 240, 255 }, { 230, 210, 180, 255 }, { 200, 180, 240, 255 },
+    { 240, 246, 255, 255 }
+};
+static const SolidPalette paletteCity = {
+    {  74,  86, 108, 255 }, { 108, 130, 160, 255 }, {  46,  54,  72, 255 },
+    { 100, 180, 220, 255 }, { 200, 150,  90, 255 }, { 200, 120, 190, 255 },
+    { 140, 200, 240, 255 }
+};
+static const SolidPalette paletteTower = {
+    { 120,  78,  42, 255 }, { 150, 108,  60, 255 }, {  70,  44,  26, 255 },
+    { 190, 150,  80, 255 }, { 210, 160,  80, 255 }, { 200, 170, 110, 255 },
+    { 220, 180, 110, 255 }
+};
+static const SolidPalette paletteEditor = {
+    {  80, 130,  80, 255 }, { 120, 160, 220, 255 }, {  90,  90, 100, 255 },
+    {  80, 180, 200, 255 }, { 190, 140,  80, 255 }, { 170, 110, 220, 255 },
+    { 110, 190,  90, 255 }
+};
+
+static SolidPalette currentPalette = {
+    {  80, 130,  80, 255 }, { 120, 160, 220, 255 }, {  90,  90, 100, 255 },
+    {  80, 180, 200, 255 }, { 190, 140,  80, 255 }, { 170, 110, 220, 255 },
+    { 110, 190,  90, 255 }
+};
+
+//------------------------------------------------------------------------------------
+// Level editor state
+//------------------------------------------------------------------------------------
+#define EDITOR_GRID        20.0f
+#define EDITOR_PICK_RADIUS 26.0f
+#define CUSTOM_LEVEL_FILE  "custom_level.txt"
+
+static EditorTool editorTool = TOOL_GROUND;
+static Vector2 editorCamTarget = { 400.0f, 500.0f };
+static float   editorZoom = 1.0f;
+static bool    editorDragging = false;
+static Vector2 editorDragStart = { 0 };
+static char    editorStatusMsg[80] = "";
+static float   editorStatusTimer = 0.0f;
+
+static const char* editorToolLabels[NUM_EDITOR_TOOLS] = {
+    "GROUND", "FLOAT", "WALL", "SPIKE", "ANCHOR", "COIN", "ENEMY", "GOAL", "SPAWN"
+};
+
 static Sound sndJump, sndDoubleJump, sndLand, sndGrapple, sndWallBounce, sndCoin, sndWin, sndDeath;
 static bool audioReady = false;
 
 static void AddSolid(float x, float y, float w, float h, SolidType type)
 {
     if (solidCount >= MAX_SOLIDS) return;
-    solids[solidCount].rect = (Rectangle){ x, y, w, h };
-    solids[solidCount].type = type;
+    Solid* s = &solids[solidCount];
+    memset(s, 0, sizeof(Solid));
+    s->rect = (Rectangle){ x, y, w, h };
+    s->type = type;
+    s->moveDir = 1.0f;
+    solidCount++;
+}
+
+static void AddMovingPlatform(float x, float y, float w, float h,
+    float dx, float dy, float speed, float phase)
+{
+    if (solidCount >= MAX_SOLIDS) return;
+    Solid* s = &solids[solidCount];
+    memset(s, 0, sizeof(Solid));
+    s->rect = (Rectangle){ x, y, w, h };
+    s->type = SOLID_MOVING;
+    s->moveOrigin = (Vector2){ x, y };
+    s->moveVec = (Vector2){ dx, dy };
+    s->moveSpeed = speed;
+    s->movePhase = phase;
+    s->moveDir = 1.0f;
+    solidCount++;
+}
+
+static void AddBreakablePlatform(float x, float y, float w, float h, float delay)
+{
+    if (solidCount >= MAX_SOLIDS) return;
+    Solid* s = &solids[solidCount];
+    memset(s, 0, sizeof(Solid));
+    s->rect = (Rectangle){ x, y, w, h };
+    s->type = SOLID_BREAKABLE;
+    s->breakDelay = delay;
+    s->moveDir = 1.0f;
+    solidCount++;
+}
+
+static void AddPhasingPlatform(float x, float y, float w, float h,
+    float onTime, float offTime, float phase)
+{
+    if (solidCount >= MAX_SOLIDS) return;
+    Solid* s = &solids[solidCount];
+    memset(s, 0, sizeof(Solid));
+    s->rect = (Rectangle){ x, y, w, h };
+    s->type = SOLID_PHASING;
+    s->phaseOnTime = onTime;
+    s->phaseOffTime = offTime;
+    s->phaseOffset = phase;
+    s->moveDir = 1.0f;
     solidCount++;
 }
 
@@ -205,8 +349,6 @@ static void AddCoin(float x, float y)
     coinCount++;
 }
 
-// A simple ground patrol enemy: walks between minX and maxX at a fixed y
-// (the surface it's standing on), reversing direction at the ends.
 static void AddEnemy(float x, float groundY, float minX, float maxX, float speed)
 {
     if (enemyCount >= MAX_ENEMIES) return;
@@ -216,6 +358,163 @@ static void AddEnemy(float x, float groundY, float minX, float maxX, float speed
     enemies[enemyCount].speed = speed;
     enemies[enemyCount].dir = 1.0f;
     enemyCount++;
+}
+
+static void EditorStatus(const char* msg)
+{
+    snprintf(editorStatusMsg, sizeof(editorStatusMsg), "%s", msg);
+    editorStatusTimer = 2.2f;
+}
+
+static float EditorSnap(float v) { return roundf(v / EDITOR_GRID) * EDITOR_GRID; }
+
+static void RecalcCustomWorldBounds(void)
+{
+    float minX = spawnPoint.x, maxX = spawnPoint.x + 200.0f;
+    float minY = spawnPoint.y - 300.0f, maxY = spawnPoint.y + 300.0f;
+
+#define EXPAND(px, py) do { \
+        if ((px) < minX) minX = (px); if ((px) > maxX) maxX = (px); \
+        if ((py) < minY) minY = (py); if ((py) > maxY) maxY = (py); \
+    } while (0)
+
+    EXPAND(goalRect.x, goalRect.y);
+    EXPAND(goalRect.x + goalRect.width, goalRect.y + goalRect.height);
+    for (int i = 0; i < solidCount; i++)
+    {
+        EXPAND(solids[i].rect.x, solids[i].rect.y);
+        EXPAND(solids[i].rect.x + solids[i].rect.width, solids[i].rect.y + solids[i].rect.height);
+    }
+    for (int i = 0; i < spikeCount; i++)
+    {
+        EXPAND(spikes[i].x, spikes[i].y);
+        EXPAND(spikes[i].x + spikes[i].width, spikes[i].y + spikes[i].height);
+    }
+    for (int i = 0; i < anchorCount; i++) EXPAND(anchors[i].x, anchors[i].y);
+    for (int i = 0; i < coinCount; i++) EXPAND(coins[i].pos.x, coins[i].pos.y);
+    for (int i = 0; i < enemyCount; i++) EXPAND(enemies[i].pos.x, enemies[i].pos.y);
+#undef EXPAND
+
+    worldWidth = maxX + 400.0f;
+    worldTopY = minY - 300.0f;
+    worldBottomY = maxY + 300.0f;
+}
+
+static void ResetCustomLevelScaffold(void)
+{
+    solidCount = spikeCount = anchorCount = coinCount = enemyCount = 0;
+    AddSolid(0, 650, 600, 100, SOLID_GROUND);
+    spawnPoint = (Vector2){ 60, 650 - PLAYER_H };
+    goalRect = (Rectangle){ 2000, 580, 40, 70 };
+    RecalcCustomWorldBounds();
+}
+
+static bool TryEraseNear(Vector2 world)
+{
+    for (int i = solidCount - 1; i >= 0; i--)
+        if (CheckCollisionPointRec(world, solids[i].rect)) { solids[i] = solids[--solidCount]; return true; }
+    for (int i = spikeCount - 1; i >= 0; i--)
+        if (CheckCollisionPointRec(world, spikes[i])) { spikes[i] = spikes[--spikeCount]; return true; }
+    for (int i = anchorCount - 1; i >= 0; i--)
+        if (Vector2Distance(world, anchors[i]) < EDITOR_PICK_RADIUS) { anchors[i] = anchors[--anchorCount]; return true; }
+    for (int i = coinCount - 1; i >= 0; i--)
+        if (Vector2Distance(world, coins[i].pos) < EDITOR_PICK_RADIUS) { coins[i] = coins[--coinCount]; return true; }
+    for (int i = enemyCount - 1; i >= 0; i--)
+        if (Vector2Distance(world, enemies[i].pos) < EDITOR_PICK_RADIUS * 1.3f) { enemies[i] = enemies[--enemyCount]; return true; }
+    return false;
+}
+
+static void SaveCustomLevel(void)
+{
+    FILE* f = fopen(CUSTOM_LEVEL_FILE, "w");
+    if (!f) { EditorStatus("Save failed (couldn't open file)"); return; }
+
+    fprintf(f, "CUSTOMLEVEL 1\n");
+    fprintf(f, "SPAWN %f %f\n", spawnPoint.x, spawnPoint.y);
+    fprintf(f, "GOAL %f %f %f %f\n", goalRect.x, goalRect.y, goalRect.width, goalRect.height);
+    fprintf(f, "SOLIDS %d\n", solidCount);
+    for (int i = 0; i < solidCount; i++)
+        fprintf(f, "%f %f %f %f %d\n", solids[i].rect.x, solids[i].rect.y,
+            solids[i].rect.width, solids[i].rect.height, (int)solids[i].type);
+    fprintf(f, "SPIKES %d\n", spikeCount);
+    for (int i = 0; i < spikeCount; i++)
+        fprintf(f, "%f %f %f %f\n", spikes[i].x, spikes[i].y, spikes[i].width, spikes[i].height);
+    fprintf(f, "ANCHORS %d\n", anchorCount);
+    for (int i = 0; i < anchorCount; i++)
+        fprintf(f, "%f %f\n", anchors[i].x, anchors[i].y);
+    fprintf(f, "COINS %d\n", coinCount);
+    for (int i = 0; i < coinCount; i++)
+        fprintf(f, "%f %f\n", coins[i].pos.x, coins[i].pos.y);
+    fprintf(f, "ENEMIES %d\n", enemyCount);
+    for (int i = 0; i < enemyCount; i++)
+        fprintf(f, "%f %f %f %f %f\n", enemies[i].pos.x, enemies[i].pos.y,
+            enemies[i].minX, enemies[i].maxX, enemies[i].speed);
+
+    fclose(f);
+    EditorStatus("Saved!");
+}
+
+static bool LoadCustomLevel(void)
+{
+    FILE* f = fopen(CUSTOM_LEVEL_FILE, "r");
+    if (!f) return false;
+
+    char tag[32];
+    int version = 0;
+    if (fscanf(f, "%31s %d", tag, &version) != 2 || strcmp(tag, "CUSTOMLEVEL") != 0)
+    {
+        fclose(f);
+        return false;
+    }
+
+    solidCount = spikeCount = anchorCount = coinCount = enemyCount = 0;
+
+    float sx, sy, gx, gy, gw, gh;
+    fscanf(f, "%31s %f %f", tag, &sx, &sy);
+    spawnPoint = (Vector2){ sx, sy };
+    fscanf(f, "%31s %f %f %f %f", tag, &gx, &gy, &gw, &gh);
+    goalRect = (Rectangle){ gx, gy, gw, gh };
+
+    int n = 0;
+    fscanf(f, "%31s %d", tag, &n);
+    for (int i = 0; i < n; i++)
+    {
+        float x, y, w, h; int type;
+        if (fscanf(f, "%f %f %f %f %d", &x, &y, &w, &h, &type) != 5) break;
+        AddSolid(x, y, w, h, (SolidType)type);
+    }
+    fscanf(f, "%31s %d", tag, &n);
+    for (int i = 0; i < n; i++)
+    {
+        float x, y, w, h;
+        if (fscanf(f, "%f %f %f %f", &x, &y, &w, &h) != 4) break;
+        AddSpike(x, y, w, h);
+    }
+    fscanf(f, "%31s %d", tag, &n);
+    for (int i = 0; i < n; i++)
+    {
+        float x, y;
+        if (fscanf(f, "%f %f", &x, &y) != 2) break;
+        AddAnchor(x, y);
+    }
+    fscanf(f, "%31s %d", tag, &n);
+    for (int i = 0; i < n; i++)
+    {
+        float x, y;
+        if (fscanf(f, "%f %f", &x, &y) != 2) break;
+        AddCoin(x, y);
+    }
+    fscanf(f, "%31s %d", tag, &n);
+    for (int i = 0; i < n; i++)
+    {
+        float x, y, minX, maxX, speed;
+        if (fscanf(f, "%f %f %f %f %f", &x, &y, &minX, &maxX, &speed) != 5) break;
+        AddEnemy(x, y, minX, maxX, speed);
+    }
+
+    fclose(f);
+    RecalcCustomWorldBounds();
+    return true;
 }
 
 static void UpdateEnemies(float dt)
@@ -246,7 +545,6 @@ static void DrawEnemies(float t)
         DrawEllipseLines((int)(body.x + body.width * 0.5f), (int)(body.y + body.height * 0.6f),
             body.width * 0.5f, body.height * 0.5f, (Color) { 60, 10, 70, 255 });
 
-        // little spikes on top to read as dangerous
         for (int k = 0; k < 3; k++)
         {
             float sx = body.x + body.width * (0.2f + 0.3f * k);
@@ -262,16 +560,12 @@ static void DrawEnemies(float t)
             });
         }
 
-        // eyes, looking in the direction of travel
         float eyeDir = enemies[i].dir;
         DrawCircle((int)(body.x + body.width * 0.5f + eyeDir * 5.0f), (int)(body.y + body.height * 0.55f), 3.0f, WHITE);
         DrawCircle((int)(body.x + body.width * 0.5f + eyeDir * 5.0f), (int)(body.y + body.height * 0.55f), 1.3f, BLACK);
     }
 }
 
-//------------------------------------------------------------------------------------
-// Particles
-//------------------------------------------------------------------------------------
 static void SpawnParticle(Vector2 pos, Vector2 vel, float life, float size, Color color)
 {
     for (int i = 0; i < MAX_PARTICLES; i++)
@@ -330,9 +624,6 @@ static void Shake(float mag, float time)
     if (time > shakeTime) shakeTime = time;
 }
 
-//------------------------------------------------------------------------------------
-// Procedural chiptune sound effects (no external files required)
-//------------------------------------------------------------------------------------
 static Sound MakeTone(float freq, float duration, float freqSlide, bool square)
 {
     int sampleRate = 44100;
@@ -346,7 +637,7 @@ static Sound MakeTone(float freq, float duration, float freqSlide, bool square)
         float f = freq + freqSlide * t;
         float phase = 2.0f * PI * f * t;
         float value = square ? (sinf(phase) >= 0.0f ? 1.0f : -1.0f) : sinf(phase);
-        float env = 1.0f - (float)i / (float)frameCount; // linear decay envelope
+        float env = 1.0f - (float)i / (float)frameCount;
         env = env * env;
         data[i] = (short)(value * env * 4000.0f);
     }
@@ -359,7 +650,7 @@ static Sound MakeTone(float freq, float duration, float freqSlide, bool square)
     wave.data = data;
 
     Sound s = LoadSoundFromWave(wave);
-    UnloadWave(wave); // frees the malloc'd buffer
+    UnloadWave(wave);
     return s;
 }
 
@@ -395,55 +686,39 @@ static void ShutdownGameAudio(void)
 
 static void Snd(Sound s) { if (audioReady) PlaySound(s); }
 
-//------------------------------------------------------------------------------------
-// Level layout
-// Ground baseline top = 650. Gaps between ground segments are pits.
-// A handful of floating platforms and tall walls require the grapple to cross.
-// Coins are sprinkled along risky routes and grapple arcs as an optional
-// collect-em-all objective on top of just reaching the goal.
-//------------------------------------------------------------------------------------
 static void BuildLevel1(void)
 {
-    // --- Section 1: start, simple gap ---
     AddSolid(0, 650, 520, 100, SOLID_GROUND);
     AddCoin(260, 580);
-    // pit: 520 - 660
     AddSolid(660, 650, 380, 100, SOLID_GROUND);
     AddCoin(840, 580);
 
-    // --- Section 2: spikes on the ground ---
     AddSolid(1040, 650, 360, 100, SOLID_GROUND);
     AddSpike(1180, 630, 100, 20);
     AddCoin(1300, 580);
 
-    // --- Section 3: wide pit needing a grapple swing ---
-    // pit: 1400 - 1650
     AddAnchor(1520, 380);
-    AddCoin(1520, 500); // reward for swinging cleanly through the arc
+    AddCoin(1520, 500);
     AddSolid(1650, 650, 320, 100, SOLID_GROUND);
 
-    // --- Section 4: floating platforms staircase (jumpable) ---
     AddSolid(2050, 540, 150, 30, SOLID_FLOATING);
     AddCoin(2125, 490);
     AddSolid(2260, 420, 150, 30, SOLID_FLOATING);
     AddCoin(2335, 370);
-    AddAnchor(2340, 200); // optional grapple assist to the higher platform
+    AddAnchor(2340, 200);
 
-    // --- Section 5: drop back down, spiky ground run ---
     AddSolid(2500, 650, 420, 100, SOLID_GROUND);
     AddSpike(2620, 630, 90, 20);
     AddSpike(2780, 630, 90, 20);
     AddCoin(2700, 580);
 
-    // --- Section 6: tall wall, must swing over the top ---
     AddSolid(2960, 380, 40, 370, SOLID_WALL);
     AddAnchor(2980, 220);
     AddCoin(2980, 300);
 
-    // --- Section 7: the Sky Tower ---
-    AddSolid(3040, 650, 540, 100, SOLID_GROUND);   // shaft floor
-    AddSolid(3300, 250, 40, 300, SOLID_WALL);      // left shaft wall
-    AddSolid(3540, 250, 40, 300, SOLID_WALL);      // right shaft wall
+    AddSolid(3040, 650, 540, 100, SOLID_GROUND);
+    AddSolid(3300, 250, 40, 300, SOLID_WALL);
+    AddSolid(3540, 250, 40, 300, SOLID_WALL);
     AddAnchor(3440, 560);
     AddAnchor(3440, 430);
     AddAnchor(3440, 300);
@@ -451,10 +726,9 @@ static void BuildLevel1(void)
     AddCoin(3440, 480);
     AddCoin(3440, 350);
     AddCoin(3440, 220);
-    AddSolid(3540, 150, 220, 30, SOLID_FLOATING);  // exit ledge above the right wall
+    AddSolid(3540, 150, 220, 30, SOLID_FLOATING);
     AddCoin(3650, 100);
 
-    // --- Section 8: floating staircase back down from the tower ---
     AddSolid(3760, 300, 150, 30, SOLID_FLOATING);
     AddSolid(3960, 440, 150, 30, SOLID_FLOATING);
     AddCoin(4035, 390);
@@ -463,8 +737,6 @@ static void BuildLevel1(void)
     AddSpike(4480, 630, 90, 20);
     AddSpike(4630, 630, 90, 20);
 
-    // --- Section 9: final big pit + swing, then home stretch ---
-    // pit: 4760 - 5060
     AddAnchor(4910, 340);
     AddCoin(4910, 460);
     AddSolid(5060, 650, 800, 100, SOLID_GROUND);
@@ -472,7 +744,6 @@ static void BuildLevel1(void)
     AddSpike(5440, 630, 90, 20);
     AddCoin(5360, 580);
 
-    // Floating bonus platform near the end (optional path)
     AddSolid(5610, 520, 160, 30, SOLID_FLOATING);
     AddCoin(5690, 470);
     AddAnchor(5690, 330);
@@ -483,14 +754,11 @@ static void BuildLevel1(void)
     worldWidth = 6000.0f;
 }
 
-// Level 2: a ground-heavy gauntlet. Spike runs, a wall that needs a double
-// jump (or the anchor above it), and pits sized for a double jump or swing.
 static void BuildLevel2(void)
 {
     AddSolid(0, 650, 600, 100, SOLID_GROUND);
     AddCoin(300, 580);
 
-    // Spike run
     AddSolid(600, 650, 900, 100, SOLID_GROUND);
     AddSpike(780, 630, 90, 20);
     AddSpike(960, 630, 90, 20);
@@ -500,7 +768,6 @@ static void BuildLevel2(void)
     AddCoin(1050, 540);
     AddCoin(1230, 540);
 
-    // Pit 1500 - 1760: swing across
     AddAnchor(1630, 380);
     AddCoin(1630, 500);
     AddSolid(1760, 650, 760, 100, SOLID_GROUND);
@@ -508,12 +775,10 @@ static void BuildLevel2(void)
     AddSpike(2080, 630, 90, 20);
     AddCoin(1985, 560);
 
-    // Wall taller than a single jump: double jump, or swing off the anchor
     AddSolid(2300, 480, 40, 170, SOLID_WALL);
     AddAnchor(2320, 300);
     AddCoin(2320, 400);
 
-    // Wide pit 2520 - 2860: double jump or chain the two anchors
     AddAnchor(2620, 400);
     AddAnchor(2780, 380);
     AddCoin(2700, 470);
@@ -524,7 +789,6 @@ static void BuildLevel2(void)
     AddCoin(3090, 540);
     AddCoin(3270, 540);
 
-    // Last pit 3700 - 3950
     AddAnchor(3830, 400);
     AddCoin(3830, 520);
     AddSolid(3950, 650, 450, 100, SOLID_GROUND);
@@ -535,14 +799,11 @@ static void BuildLevel2(void)
     worldWidth = 4500.0f;
 }
 
-// Level 3: floating islands over a bottomless drop. Every gap is crossable
-// with a double jump; the anchors are shortcuts and coin routes.
 static void BuildLevel3(void)
 {
     AddSolid(0, 650, 420, 100, SOLID_GROUND);
     AddCoin(200, 580);
 
-    // Rising staircase of islands
     AddSolid(600, 600, 180, 30, SOLID_FLOATING);
     AddCoin(690, 550);
     AddSolid(960, 540, 180, 30, SOLID_FLOATING);
@@ -551,7 +812,6 @@ static void BuildLevel3(void)
     AddAnchor(1150, 250);
     AddCoin(1150, 330);
 
-    // 300 gap
     AddAnchor(1630, 250);
     AddSolid(1780, 470, 160, 30, SOLID_FLOATING);
     AddCoin(1630, 350);
@@ -562,7 +822,6 @@ static void BuildLevel3(void)
     AddSolid(2850, 260, 160, 30, SOLID_FLOATING);
     AddCoin(2930, 210);
 
-    // Platform with a wall to clear (double jump, or swing over it)
     AddSolid(3150, 260, 260, 30, SOLID_FLOATING);
     AddSolid(3300, 100, 40, 160, SOLID_WALL);
     AddAnchor(3320, 20);
@@ -571,7 +830,6 @@ static void BuildLevel3(void)
     AddSolid(3600, 300, 160, 30, SOLID_FLOATING);
     AddCoin(3680, 250);
 
-    // Long gap 3760 - 4200: chain the anchors (or a very good double jump)
     AddAnchor(3900, 140);
     AddAnchor(4080, 130);
     AddCoin(3990, 260);
@@ -580,7 +838,6 @@ static void BuildLevel3(void)
     AddSolid(4560, 470, 160, 30, SOLID_FLOATING);
     AddCoin(4640, 420);
 
-    // Home stretch
     AddSolid(4900, 650, 700, 100, SOLID_GROUND);
     AddSpike(5100, 630, 90, 20);
     AddSpike(5280, 630, 90, 20);
@@ -591,15 +848,9 @@ static void BuildLevel3(void)
     worldWidth = 5700.0f;
 }
 
-// Level 4: a long twin-lane level (ground route + grapple route) built from
-// reusable section patterns; contributed on the sean branch.
 #define SECTION_WIDTH      760.0f
-#define SECTION_WIDTH_ALT  680.0f   // second-half sections are a different width,
-                                    // so the rhythm of gaps/anchors never lines up
+#define SECTION_WIDTH_ALT  680.0f
 
-// =====================================================================================
-// LOWER LANE - ACT I (ground route, first half)
-// =====================================================================================
 static void LowerFlatSpike(float x0)
 {
     AddSolid(x0, 650, SECTION_WIDTH, 100, SOLID_GROUND);
@@ -720,34 +971,14 @@ static LowerPatternFn lowerPatternsAct1[] = {
 };
 #define NUM_LOWER_PATTERNS_ACT1 16
 
-// =====================================================================================
-// LOWER LANE - ACT II (ground route, second half)
-//
-// These are deliberately NOT re-skins of the Act I patterns. The whole lane
-// sits 40px lower (baseline y=690) so the second half has its own visual and
-// spatial identity, and every pattern uses a different shape language:
-//   - comb/spike fields instead of single spikes
-//   - overhangs and crawl spaces instead of open plateaus
-//   - moving-enemy corridors instead of static gauntlets
-//   - multi-tier steps instead of a symmetric staircase
-// =====================================================================================
-
-// A low, wide "comb" of many small spikes - you have to commit to a full
-// running jump and clear the whole field in one go, rather than hopping over
-// isolated blades.
 static void Lower2_SpikeComb(float x0)
 {
     AddSolid(x0, 690, SECTION_WIDTH_ALT, 100, SOLID_GROUND);
-    // Five evenly spaced spikes; the last one is right at the edge of a
-    // full-speed jump arc, so you can't take it lazily.
     for (int i = 0; i < 5; i++)
         AddSpike(x0 + 180 + i * 80, 670, 40, 20);
     AddCoin(x0 + SECTION_WIDTH_ALT * 0.5f, 600);
 }
 
-// A raised ridge with a patrol enemy on top AND a spike on the far side of
-// the landing zone - you have to decide whether to fight the enemy or take
-// the harder long jump over both hazards.
 static void Lower2_RidgeAmbush(float x0)
 {
     float entryW = 130.0f;
@@ -764,33 +995,25 @@ static void Lower2_RidgeAmbush(float x0)
     AddCoin(x0 + entryW + ridgeW * 0.5f, ridgeY - 60.0f);
 }
 
-// A crawl-space corridor: solid rock overhead with just enough clearance to
-// run through, but a low spike strip on the floor means you have to jump
-// *just* right without hitting your head. Different from the Act I tunnel
-// (which was enemy-driven and had no floor hazard).
 static void Lower2_CrawlSpikes(float x0)
 {
     float entryW = 100.0f;
     float crawlW = 440.0f;
     float exitW = SECTION_WIDTH_ALT - entryW - crawlW;
 
-    float clearance = 50.0f;   // slightly taller than the Act I tunnel
+    float clearance = 50.0f;
     float ceilBottomY = 690.0f - PLAYER_H - clearance;
     float ceilThickness = 80.0f;
 
     AddSolid(x0, 690, entryW, 100, SOLID_GROUND);
     AddSolid(x0 + entryW, 690, crawlW, 100, SOLID_GROUND);
     AddSolid(x0 + entryW, ceilBottomY - ceilThickness, crawlW, ceilThickness, SOLID_WALL);
-    // two low spike strips, forcing a short hop between them
     AddSpike(x0 + entryW + 90, 670, 70, 20);
     AddSpike(x0 + entryW + 280, 670, 70, 20);
     AddSolid(x0 + entryW + crawlW, 690, exitW, 100, SOLID_GROUND);
     AddCoin(x0 + entryW + crawlW - 60, 640);
 }
 
-// A drop into a narrow chasm with a spike floor, a single floating step in
-// the middle, and a climb out on the far side. Much tighter than the Act I
-// sunken trench.
 static void Lower2_ChasmHop(float x0)
 {
     float entryW = 160.0f;
@@ -798,18 +1021,13 @@ static void Lower2_ChasmHop(float x0)
     float exitW = SECTION_WIDTH_ALT - entryW - chasmW;
 
     AddSolid(x0, 690, entryW, 100, SOLID_GROUND);
-    // chasm floor is low, with spikes along it
     AddSolid(x0 + entryW, 690 + 160, chasmW, 100, SOLID_GROUND);
     AddSpike(x0 + entryW + 100, 670 + 160, 160, 20);
-    // one small floating stepping stone in the middle of the chasm
     AddSolid(x0 + entryW + chasmW * 0.5f - 40, 690 + 40, 80, 24, SOLID_FLOATING);
     AddCoin(x0 + entryW + chasmW * 0.5f, 690 + 10);
     AddSolid(x0 + entryW + chasmW, 690, exitW, 100, SOLID_GROUND);
 }
 
-// A three-tier descent: down a step, along a shelf, down another step, along
-// a lower shelf, then back up. The Act I staircase went *up then down*; this
-// one only ever descends, which reads very differently in motion.
 static void Lower2_Descent(float x0)
 {
     float cx = x0;
@@ -830,9 +1048,6 @@ static void Lower2_Descent(float x0)
     AddSolid(cx, 690, lastW, 100, SOLID_GROUND);
 }
 
-// A corridor with two enemies patrolling in opposite phases - you have to
-// thread between them rather than simply jump one. Distinct from the Act I
-// EnemyGauntlet, which had both enemies on flat open ground.
 static void Lower2_EnemyPincer(float x0)
 {
     float entryW = 140.0f;
@@ -841,7 +1056,6 @@ static void Lower2_EnemyPincer(float x0)
 
     AddSolid(x0, 690, entryW, 100, SOLID_GROUND);
     AddSolid(x0 + entryW, 690, corridorW, 100, SOLID_GROUND);
-    // Two enemies whose patrol ranges overlap in the middle - they cross.
     AddEnemy(x0 + entryW + 110, 690, x0 + entryW + 30.0f,
         x0 + entryW + corridorW * 0.65f, 130.0f);
     AddEnemy(x0 + entryW + corridorW - 110, 690,
@@ -851,9 +1065,6 @@ static void Lower2_EnemyPincer(float x0)
     AddCoin(x0 + entryW + corridorW * 0.5f, 620);
 }
 
-// A wide pit you cross via two floating stepping stones - requires either
-// two well-timed jumps or a grapple off a nearby anchor. Different from the
-// Act I RunningJumpPit (single gap, one jump).
 static void Lower2_SteppingPit(float x0)
 {
     float g1 = 220.0f;
@@ -862,7 +1073,6 @@ static void Lower2_SteppingPit(float x0)
 
     AddSolid(x0, 690, g1, 100, SOLID_GROUND);
     AddSolid(x0 + g1 + pitW, 690, g2, 100, SOLID_GROUND);
-    // two stepping stones over the pit
     AddSolid(x0 + g1 + pitW * 0.33f - 40, 690 - 30, 80, 22, SOLID_FLOATING);
     AddSolid(x0 + g1 + pitW * 0.66f - 40, 690 - 30, 80, 22, SOLID_FLOATING);
     AddCoin(x0 + g1 + pitW * 0.5f, 610);
@@ -876,9 +1086,6 @@ static LowerPatternFn lowerPatternsAct2[] = {
 };
 #define NUM_LOWER_PATTERNS_ACT2 16
 
-// =====================================================================================
-// UPPER LANE - ACT I (grapple route, first half)
-// =====================================================================================
 static void UpperSingleSwing(float x0)
 {
     AddAnchor(x0 + 380, 300);
@@ -903,19 +1110,6 @@ typedef void (*UpperPatternFn)(float);
 static UpperPatternFn upperPatternsAct1[] = { UpperSingleSwing, UpperSwingToRest, UpperClimbingChain };
 #define NUM_UPPER_PATTERNS_ACT1 3
 
-// =====================================================================================
-// UPPER LANE - ACT II (grapple route, second half)
-//
-// Different anchor geometry and different rest-platform shapes. Where Act I
-// alternated single anchors with small floating rests, Act II uses:
-//   - paired anchors close together (double-swing chains)
-//   - long vertical chains that climb rather than cross
-//   - rest platforms that are *moving-feeling* (thin and offset) rather than
-//     big flat rectangles
-// =====================================================================================
-
-// Two anchors close together, forcing a fast release-and-refire rather than
-// one big pendulum.
 static void Upper2_DoubleSwing(float x0)
 {
     AddAnchor(x0 + 200, 320);
@@ -923,8 +1117,6 @@ static void Upper2_DoubleSwing(float x0)
     AddCoin(x0 + 330, 380);
 }
 
-// A vertical ladder of three anchors - you reel in on each to climb, more
-// like an ascent than a swing.
 static void Upper2_VerticalLadder(float x0)
 {
     AddAnchor(x0 + 360, 380);
@@ -933,8 +1125,6 @@ static void Upper2_VerticalLadder(float x0)
     AddCoin(x0 + 360, 90);
 }
 
-// A swing out over a long gap onto a thin offset ledge (rather than a wide
-// flat rest platform), with the anchor placed so you naturally land moving.
 static void Upper2_OffsetLedge(float x0)
 {
     AddAnchor(x0 + 220, 290);
@@ -942,8 +1132,6 @@ static void Upper2_OffsetLedge(float x0)
     AddCoin(x0 + 520, 310);
 }
 
-// A high anchor that you swing *under*, with the exit coin placed low so
-// you have to let go early and fall to grab it.
 static void Upper2_UnderSwing(float x0)
 {
     AddAnchor(x0 + 340, 180);
@@ -956,7 +1144,6 @@ static UpperPatternFn upperPatternsAct2[] = {
 };
 #define NUM_UPPER_PATTERNS_ACT2 6
 
-// ---- Act-specific twin-lane builders (different section width per act) ----
 static void BuildTwinLaneStretchAct1(float startX, int numSections, int lowerOffset, int upperOffset)
 {
     for (int s = 0; s < numSections; s++)
@@ -977,8 +1164,6 @@ static void BuildTwinLaneStretchAct2(float startX, int numSections, int lowerOff
     }
 }
 
-// Returns the total width consumed by an Act II stretch, since the caller
-// needs it to place the next landmark.
 static float Act2StretchWidth(int numSections)
 {
     return numSections * SECTION_WIDTH_ALT;
@@ -986,29 +1171,23 @@ static float Act2StretchWidth(int numSections)
 
 static void BuildLevel4(void)
 {
-
-    // --- Shared intro: everyone starts on the same simple ground run ---
     AddSolid(0, 650, 520, 100, SOLID_GROUND);
     AddCoin(260, 580);
-    // pit: 520 - 660
     AddSolid(660, 650, 240, 100, SOLID_GROUND);
     AddCoin(780, 580);
 
-    // --- The Fork: a stepping stone + anchor mark the entrance to the upper route ---
     float forkX = 900.0f;
-    AddSolid(forkX - 60, 520, 120, 30, SOLID_FLOATING); // hop up here to start grappling
+    AddSolid(forkX - 60, 520, 120, 30, SOLID_FLOATING);
     AddAnchor(forkX + 60, 340);
     AddCoin(forkX - 20, 470);
 
-    // --- Twin-lane stretch #1 (Act I patterns) ---
     const int N1 = 10;
     BuildTwinLaneStretchAct1(forkX, N1, 0, 0);
     float towerX = forkX + N1 * SECTION_WIDTH;
 
-    // --- The Sky Tower: both lanes are forced to converge here and grapple up ---
-    AddSolid(towerX, 650, 540, 100, SOLID_GROUND);   // shaft floor
-    AddSolid(towerX + 260, 250, 40, 300, SOLID_WALL); // left shaft wall
-    AddSolid(towerX + 500, 250, 40, 300, SOLID_WALL); // right shaft wall
+    AddSolid(towerX, 650, 540, 100, SOLID_GROUND);
+    AddSolid(towerX + 260, 250, 40, 300, SOLID_WALL);
+    AddSolid(towerX + 500, 250, 40, 300, SOLID_WALL);
     AddAnchor(towerX + 380, 560);
     AddAnchor(towerX + 380, 430);
     AddAnchor(towerX + 380, 300);
@@ -1016,45 +1195,34 @@ static void BuildLevel4(void)
     AddCoin(towerX + 380, 480);
     AddCoin(towerX + 380, 350);
     AddCoin(towerX + 380, 220);
-    AddSolid(towerX + 500, 150, 220, 30, SOLID_FLOATING); // exit ledge above the right wall
+    AddSolid(towerX + 500, 150, 220, 30, SOLID_FLOATING);
     AddCoin(towerX + 610, 100);
 
-    // --- Descend back down from the tower into a floating staircase, then split lanes again ---
     float descentX = towerX + SECTION_WIDTH;
     AddSolid(descentX, 300, 150, 30, SOLID_FLOATING);
     AddSolid(descentX + 220, 440, 150, 30, SOLID_FLOATING);
     AddCoin(descentX + 295, 390);
     AddSolid(descentX + 420, 580, 150, 30, SOLID_FLOATING);
-    AddSolid(descentX + 620, 650, 300, 100, SOLID_GROUND); // touches back down to ground level
+    AddSolid(descentX + 620, 650, 300, 100, SOLID_GROUND);
     AddSpike(descentX + 700, 630, 90, 20);
 
-    // --- The second fork: a visually distinct entrance. Instead of a hop-up
-    //     stepping stone, this one is a *drop-in*: a raised lip you walk off,
-    //     with the first anchor already in range on the way down. ---
     float fork2X = descentX + 1000.0f;
-    // raised lip the player runs off
     AddSolid(fork2X - 80, 650 - 80, 160, 180, SOLID_GROUND);
-    // a coin under the lip, encouraging the drop-in
     AddCoin(fork2X + 40, 580);
-    // first anchor of Act II, placed low so you catch it on the way down
     AddAnchor(fork2X + 160, 420);
 
-    // --- Twin-lane stretch #2 (Act II patterns, narrower sections, lower baseline) ---
     const int N2 = 9;
-    float act2Start = fork2X + 200.0f;   // slight gap after the drop-in lip
+    float act2Start = fork2X + 200.0f;
     BuildTwinLaneStretchAct2(act2Start, N2, 0, 0);
     float finalX = act2Start + Act2StretchWidth(N2);
 
-    // --- Final convergence stretch, then the goal ---
-    // Blend the two baselines: a short ramp down from the Act II baseline
-    // (690) to the original 650, so the finish reads as "coming back home".
     AddSolid(finalX, 690, 260, 100, SOLID_GROUND);
     AddSolid(finalX + 260, 650, 540, 100, SOLID_GROUND);
     AddSpike(finalX + 380, 630, 90, 20);
     AddSpike(finalX + 580, 630, 90, 20);
     AddCoin(finalX + 720, 580);
 
-    AddSolid(finalX + 900, 520, 160, 30, SOLID_FLOATING); // optional bonus detour near the end
+    AddSolid(finalX + 900, 520, 160, 30, SOLID_FLOATING);
     AddCoin(finalX + 980, 470);
     AddAnchor(finalX + 980, 330);
 
@@ -1064,21 +1232,134 @@ static void BuildLevel4(void)
     spawnPoint = (Vector2){ 60, 650 - PLAYER_H };
 }
 
-static void BuildLevel(int index)
+static void BuildLevel5(void)
 {
-    solidCount = spikeCount = anchorCount = coinCount = enemyCount = 0;
+    AddSolid(0, 650, 700, 100, SOLID_GROUND);
+    AddCoin(180, 580);
+    AddCoin(520, 580);
+    AddAnchor(400, 380);
+    AddSolid(720, 590, 130, 22, SOLID_FLOATING);
+    AddSolid(900, 520, 130, 22, SOLID_FLOATING);
+    AddCoin(810, 540);
+    AddCoin(965, 470);
+    AddMovingPlatform(1080, 470, 120, 22, 0, -260, 90.0f, 0.0f);
+
+    AddSolid(1280, 180, 220, 30, SOLID_FLOATING);
+    AddCoin(1390, 130);
+    AddBreakablePlatform(1540, 180, 90, 20, 0.45f);
+    AddBreakablePlatform(1670, 180, 90, 20, 0.45f);
+    AddBreakablePlatform(1800, 180, 90, 20, 0.45f);
+    AddCoin(1585, 130);
+    AddCoin(1715, 130);
+    AddCoin(1845, 130);
+    AddSolid(1940, 180, 40, 260, SOLID_WALL);
+    AddAnchor(1960, 60);
+    AddSolid(2040, 200, 240, 30, SOLID_FLOATING);
+    AddCoin(2160, 150);
+
+    AddPhasingPlatform(2320, -120, 110, 22, 1.3f, 0.9f, 0.0f);
+    AddPhasingPlatform(2470, -160, 110, 22, 1.3f, 0.9f, 1.1f);
+    AddPhasingPlatform(2620, -120, 110, 22, 1.3f, 0.9f, 2.2f);
+    AddCoin(2375, -170);
+    AddCoin(2525, -210);
+    AddCoin(2675, -170);
+    AddSolid(2820, -180, 200, 30, SOLID_FLOATING);
+    AddCoin(2920, -230);
+    AddAnchor(2900, -360);
+
+    AddBreakablePlatform(2840, -420, 90, 20, 0.40f);
+    AddBreakablePlatform(2700, -520, 90, 20, 0.40f);
+    AddBreakablePlatform(2560, -420, 90, 20, 0.40f);
+    AddBreakablePlatform(2420, -520, 90, 20, 0.40f);
+    AddBreakablePlatform(2280, -420, 90, 20, 0.40f);
+    AddCoin(2885, -470);
+    AddCoin(2745, -570);
+    AddCoin(2605, -470);
+    AddCoin(2465, -570);
+    AddCoin(2325, -470);
+
+    AddSolid(2140, -620, 900, 30, SOLID_GROUND);
+    AddSpike(2500, -640, 80, 20);
+    AddSpike(2700, -640, 80, 20);
+    AddCoin(2400, -670);
+    AddCoin(2600, -670);
+    AddCoin(2800, -670);
+    AddAnchor(3040, -900);
+    AddSolid(3180, -800, 240, 30, SOLID_FLOATING);
+    AddCoin(3300, -850);
+    AddPhasingPlatform(3200, -720, 100, 22, 1.1f, 0.8f, 0.0f);
+    AddPhasingPlatform(3350, -660, 100, 22, 1.1f, 0.8f, 0.95f);
+    AddPhasingPlatform(3500, -720, 100, 22, 1.1f, 0.8f, 1.9f);
+    AddCoin(3250, -770);
+    AddCoin(3400, -710);
+    AddCoin(3550, -770);
+
+    AddMovingPlatform(3400, -1000, 140, 22, 0, -260, 110.0f, 0.0f);
+    AddBreakablePlatform(3250, -1080, 90, 20, 0.40f);
+    AddBreakablePlatform(3100, -1180, 90, 20, 0.40f);
+    AddBreakablePlatform(3250, -1280, 90, 20, 0.40f);
+    AddBreakablePlatform(3400, -1180, 90, 20, 0.40f);
+    AddCoin(3305, -1130);
+    AddCoin(3155, -1230);
+    AddCoin(3305, -1330);
+    AddCoin(3455, -1230);
+    AddAnchor(3560, -1080);
+
+    AddSolid(3560, -1480, 180, 30, SOLID_FLOATING);
+    AddCoin(3650, -1530);
+    AddMovingPlatform(3800, -1620, 120, 22, 180, -140, 95.0f, 0.0f);
+    AddCoin(3900, -1700);
+    AddSolid(4080, -1720, 180, 30, SOLID_FLOATING);
+    AddCoin(4170, -1770);
+    AddPhasingPlatform(4300, -1820, 110, 22, 1.4f, 0.9f, 0.0f);
+    AddCoin(4355, -1870);
+
+    AddSolid(4480, -1900, 320, 30, SOLID_FLOATING);
+    AddSolid(4480, -2200, 30, 300, SOLID_WALL);
+    AddSolid(4770, -2200, 30, 300, SOLID_WALL);
+    AddAnchor(4620, -2150);
+    AddCoin(4620, -1970);
+    goalRect = (Rectangle){ 4600, -1970, 40, 70 };
+
+    spawnPoint = (Vector2){ 100, 650 - PLAYER_H };
+    worldWidth = 5200.0f;
+    worldTopY = -2600.0f;
+    worldBottomY = 900.0f;
+}
+
+static void SetLevelTheme(int index)
+{
     switch (index)
     {
-        case 1:  BuildLevel2(); break;
-        case 2:  BuildLevel3(); break;
-        case 3:  BuildLevel4(); break;
-        default: BuildLevel1(); break;
+    case 0: currentBgTheme = BG_DEFAULT; currentPalette = paletteMeadow; break;
+    case 1: currentBgTheme = BG_CAVERN;  currentPalette = paletteCavern; break;
+    case 2: currentBgTheme = BG_SKY;     currentPalette = paletteSky;    break;
+    case 3: currentBgTheme = BG_CITY;    currentPalette = paletteCity;   break;
+    case 4: currentBgTheme = BG_TOWER;   currentPalette = paletteTower;  break;
+    default: currentBgTheme = BG_EDITOR; currentPalette = paletteEditor; break;
     }
 }
 
-//------------------------------------------------------------------------------------
-// Collision helpers
-//------------------------------------------------------------------------------------
+static void BuildLevel(int index)
+{
+    if (index == CUSTOM_LEVEL_INDEX)
+    {
+        return;
+    }
+    solidCount = spikeCount = anchorCount = coinCount = enemyCount = 0;
+    worldTopY = -60.0f;
+    worldBottomY = 1000.0f;
+    SetLevelTheme(index);
+    switch (index)
+    {
+    case 1:  BuildLevel2(); break;
+    case 2:  BuildLevel3(); break;
+    case 3:  BuildLevel4(); break;
+    case 4:  BuildLevel5(); break;
+    default: BuildLevel1(); break;
+    }
+}
+
 static Rectangle PlayerRect(Vector2 pos)
 {
     return (Rectangle) { pos.x, pos.y, PLAYER_W, PLAYER_H };
@@ -1089,15 +1370,142 @@ static Vector2 PlayerCenter(Player* p)
     return (Vector2) { p->position.x + PLAYER_W * 0.5f, p->position.y + PLAYER_H * 0.5f };
 }
 
+static bool IsSolidActive(Solid* s)
+{
+    if (s->type == SOLID_BREAKABLE && s->broken) return false;
+    if (s->type == SOLID_PHASING && s->phasedOut) return false;
+    return true;
+}
+
+static bool PlayerStandsOnSolid(Player* p, Solid* s)
+{
+    if (!p->onGround) return false;
+    Rectangle pr = PlayerRect(p->position);
+    Rectangle r = s->rect;
+    bool horizOverlap = (pr.x + pr.width > r.x) && (pr.x < r.x + r.width);
+    if (!horizOverlap) return false;
+    float feetY = pr.y + pr.height;
+    return fabsf(feetY - r.y) < 4.0f;
+}
+
+static int FindStandingBreakableIndex(Player* p)
+{
+    if (!p->onGround) return -1;
+    for (int i = 0; i < solidCount; i++) {
+        Solid* s = &solids[i];
+        if (s->type != SOLID_BREAKABLE) continue;
+        if (s->broken) continue;
+        if (PlayerStandsOnSolid(p, s)) return i;
+    }
+    return -1;
+}
+
+static int FindStandingMovingIndex(Player* p)
+{
+    if (!p->onGround) return -1;
+    for (int i = 0; i < solidCount; i++) {
+        Solid* s = &solids[i];
+        if (s->type != SOLID_MOVING) continue;
+        if (!IsSolidActive(s)) continue;
+        if (PlayerStandsOnSolid(p, s)) return i;
+    }
+    return -1;
+}
+
+static void UpdatePlatforms(Player* p, float dt)
+{
+    int ridingMoveIdx = FindStandingMovingIndex(p);
+    int ridingBreakIdx = FindStandingBreakableIndex(p);
+    Vector2 ridingDelta = { 0, 0 };
+
+    for (int i = 0; i < solidCount; i++) {
+        Solid* s = &solids[i];
+        Vector2 oldPos = { s->rect.x, s->rect.y };
+
+        switch (s->type) {
+        case SOLID_MOVING: {
+            float pathLen = Vector2Length(s->moveVec);
+            if (pathLen > 1.0f) {
+                s->movePhase += s->moveDir * (s->moveSpeed / pathLen) * dt;
+                if (s->movePhase >= 1.0f) { s->movePhase = 1.0f; s->moveDir = -1.0f; }
+                if (s->movePhase <= 0.0f) { s->movePhase = 0.0f; s->moveDir = 1.0f; }
+                Vector2 np = Vector2Add(s->moveOrigin, Vector2Scale(s->moveVec, s->movePhase));
+                s->rect.x = np.x;
+                s->rect.y = np.y;
+            }
+            break;
+        }
+        case SOLID_BREAKABLE: {
+            if (s->broken) {
+                s->respawnTimer -= dt;
+                if (s->respawnTimer <= 0.0f) {
+                    s->broken = false;
+                    s->breakTimer = 0.0f;
+                    Vector2 c = { s->rect.x + s->rect.width * 0.5f,
+                                  s->rect.y + s->rect.height * 0.5f };
+                    SpawnBurst(c, 10, 140.0f, 0.4f, 3.0f, (Color) { 220, 190, 120, 255 });
+                }
+            }
+            else if (i == ridingBreakIdx) {
+                s->breakTimer += dt;
+                if (s->breakTimer >= s->breakDelay) {
+                    s->broken = true;
+                    s->respawnTimer = 2.5f;
+                    Vector2 c = { s->rect.x + s->rect.width * 0.5f,
+                                  s->rect.y + s->rect.height * 0.5f };
+                    SpawnBurst(c, 24, 240.0f, 0.6f, 4.0f, (Color) { 190, 120, 60, 255 });
+                    Snd(sndLand);
+                    Shake(3.0f, 0.10f);
+                }
+            }
+            else {
+                if (s->breakTimer > 0.0f) {
+                    s->breakTimer -= dt * 2.5f;
+                    if (s->breakTimer < 0.0f) s->breakTimer = 0.0f;
+                }
+            }
+            break;
+        }
+        case SOLID_PHASING: {
+            s->phaseTimer += dt;
+            float cycle = s->phaseOnTime + s->phaseOffTime;
+            if (cycle > 0.0f) {
+                float t = fmodf(s->phaseTimer + s->phaseOffset, cycle);
+                bool wasOut = s->phasedOut;
+                s->phasedOut = (t >= s->phaseOnTime);
+                if (wasOut && !s->phasedOut) {
+                    Vector2 c = { s->rect.x + s->rect.width * 0.5f,
+                                  s->rect.y + s->rect.height * 0.5f };
+                    SpawnBurst(c, 8, 130.0f, 0.35f, 3.0f, (Color) { 190, 130, 250, 255 });
+                }
+            }
+            break;
+        }
+        default: break;
+        }
+
+        Vector2 newPos = { s->rect.x, s->rect.y };
+        s->velocity = (dt > 0.0f)
+            ? Vector2Scale(Vector2Subtract(newPos, oldPos), 1.0f / dt)
+            : (Vector2) { 0, 0 };
+
+        if (i == ridingMoveIdx && s->type == SOLID_MOVING)
+            ridingDelta = Vector2Subtract(newPos, oldPos);
+    }
+
+    if (ridingMoveIdx >= 0 && Vector2Length(ridingDelta) > 0.001f)
+        p->position = Vector2Add(p->position, ridingDelta);
+}
+
 static void MoveAndCollide(Player* p, float dt)
 {
     bool wasOnGround = p->onGround;
 
-    // --- Horizontal ---
     p->position.x += p->velocity.x * dt;
     Rectangle pr = PlayerRect(p->position);
     for (int i = 0; i < solidCount; i++)
     {
+        if (!IsSolidActive(&solids[i])) continue;
         if (CheckCollisionRecs(pr, solids[i].rect))
         {
             if (p->velocity.x > 0.0f) p->position.x = solids[i].rect.x - PLAYER_W;
@@ -1118,12 +1526,12 @@ static void MoveAndCollide(Player* p, float dt)
         }
     }
 
-    // --- Vertical ---
     p->onGround = false;
     p->position.y += p->velocity.y * dt;
     pr = PlayerRect(p->position);
     for (int i = 0; i < solidCount; i++)
     {
+        if (!IsSolidActive(&solids[i])) continue;
         if (CheckCollisionRecs(pr, solids[i].rect))
         {
             if (p->velocity.y > 0.0f)
@@ -1140,7 +1548,6 @@ static void MoveAndCollide(Player* p, float dt)
         }
     }
 
-    // Landing feedback: squash + dust burst, only on the frame we touch down
     if (p->onGround && !wasOnGround)
     {
         p->scale = (Vector2){ 1.35f, 0.65f };
@@ -1153,14 +1560,12 @@ static void MoveAndCollide(Player* p, float dt)
     }
 }
 
-// The grapple constraint repositions the player directly, which can leave
-// the body edge-on into a wall the rope circle happened to pass through.
-// This pushes the player back out along the shallowest overlap axis.
 static void ResolveSolidOverlap(Player* p)
 {
     Rectangle pr = PlayerRect(p->position);
     for (int i = 0; i < solidCount; i++)
     {
+        if (!IsSolidActive(&solids[i])) continue;
         Rectangle r = solids[i].rect;
         if (!CheckCollisionRecs(pr, r)) continue;
 
@@ -1233,29 +1638,129 @@ static void RespawnPlayer(Player* p)
     p->scale = (Vector2){ 1.0f, 1.0f };
 }
 
-// Level-select previews: each level is drawn once into a small texture at
-// startup (world scaled to fit, key features enlarged so they stay readable).
+#define GHOST_HZ            60.0f
+#define GHOST_MAX_SAMPLES   54000
+
+typedef struct {
+    Vector2 pos;
+    Vector2 anchor;
+    float facing;
+    bool grappling;
+} GhostSample;
+
+typedef struct {
+    GhostSample* samples;
+    int count, cap;
+} GhostTrack;
+
+static GhostTrack recordingTrack;
+static bool recordingOverflow = false;
+static GhostTrack ghostTracks[LEVEL_COUNT];
+
+static void RecordingReset(void)
+{
+    recordingTrack.count = 0;
+    recordingOverflow = false;
+}
+
+static void RecordGhost(Player* p)
+{
+    int target = (int)(levelTime * GHOST_HZ);
+    while (recordingTrack.count <= target)
+    {
+        if (recordingTrack.count >= GHOST_MAX_SAMPLES) { recordingOverflow = true; return; }
+        if (recordingTrack.count >= recordingTrack.cap)
+        {
+            int newCap = recordingTrack.cap ? recordingTrack.cap * 2 : 2048;
+            GhostSample* grown = realloc(recordingTrack.samples, newCap * sizeof(GhostSample));
+            if (!grown) { recordingOverflow = true; return; }
+            recordingTrack.samples = grown;
+            recordingTrack.cap = newCap;
+        }
+        recordingTrack.samples[recordingTrack.count++] = (GhostSample){
+            p->position, p->grappleAnchor, p->facing, p->grappling
+        };
+    }
+}
+
+static void SaveGhost(int level)
+{
+    if (recordingOverflow || recordingTrack.count < 2) return;
+    GhostSample* copy = malloc(recordingTrack.count * sizeof(GhostSample));
+    if (!copy) return;
+    memcpy(copy, recordingTrack.samples, recordingTrack.count * sizeof(GhostSample));
+    free(ghostTracks[level].samples);
+    ghostTracks[level].samples = copy;
+    ghostTracks[level].count = ghostTracks[level].cap = recordingTrack.count;
+}
+
+static bool GetGhostSample(int level, float t, GhostSample* out)
+{
+    GhostTrack* g = &ghostTracks[level];
+    if (g->count < 2) return false;
+
+    float f = t * GHOST_HZ;
+    int i = (int)f;
+    if (i >= g->count - 1)
+    {
+        *out = g->samples[g->count - 1];
+    }
+    else
+    {
+        GhostSample a = g->samples[i], b = g->samples[i + 1];
+        float k = f - (float)i;
+        *out = a;
+        out->pos = Vector2Lerp(a.pos, b.pos, k);
+        out->anchor = Vector2Lerp(a.anchor, b.anchor, k);
+    }
+    return true;
+}
+
+static void DrawGhost(int level, float t)
+{
+    GhostSample s;
+    if (!GetGhostSample(level, t, &s)) return;
+
+    Color body = (Color){ 130, 210, 255, 110 };
+    Color edge = (Color){ 40, 110, 170, 150 };
+    if (s.grappling)
+        DrawLineEx((Vector2) { s.pos.x + PLAYER_W * 0.5f, s.pos.y + PLAYER_H * 0.5f }, s.anchor, 1.5f, (Color) { 130, 210, 255, 90 });
+    Rectangle r = { s.pos.x, s.pos.y, PLAYER_W, PLAYER_H };
+    DrawRectangleRec(r, body);
+    DrawRectangleLinesEx(r, 2, edge);
+    DrawCircle((int)(r.x + PLAYER_W * 0.5f + s.facing * 8.0f), (int)(r.y + 14), 3, (Color) { 255, 255, 255, 170 });
+    const char* tag = "PB";
+    DrawText(tag, (int)(r.x + PLAYER_W * 0.5f - MeasureText(tag, 12) * 0.5f), (int)r.y - 16, 12, (Color) { 130, 210, 255, 220 });
+}
+
 #define PREVIEW_W 456
 #define PREVIEW_H 128
 static RenderTexture2D levelPreviews[LEVEL_COUNT];
+
+typedef struct { float sx, sy, minY, offY; } PreviewTransform;
+static PreviewTransform previewTransform[LEVEL_COUNT];
 
 static void BakeLevelPreview(int index)
 {
     BuildLevel(index);
 
     float minY = goalRect.y;
-    for (int i = 0; i < solidCount; i++) minY = fminf(minY, solids[i].rect.y);
+    float maxY = goalRect.y + goalRect.height;
+    for (int i = 0; i < solidCount; i++)
+    {
+        minY = fminf(minY, solids[i].rect.y);
+        maxY = fmaxf(maxY, solids[i].rect.y + solids[i].rect.height);
+    }
     for (int i = 0; i < anchorCount; i++) minY = fminf(minY, anchors[i].y);
     for (int i = 0; i < coinCount; i++) minY = fminf(minY, coins[i].pos.y);
     minY -= 40.0f;
-    float maxY = 720.0f;
+    maxY += 40.0f;
+    if (maxY < 720.0f) maxY = 720.0f;
 
-    // Scale x to fit the whole level; y fits the height but is capped at 3x the
-    // x scale, so very long levels get a stretched (readable) profile instead
-    // of a hairline. Level is vertically centered in the texture.
     float sx = (float)PREVIEW_W / worldWidth;
-    float sy = fminf((float)PREVIEW_H / (maxY - minY), sx * 3.0f);
+    float sy = (float)PREVIEW_H / (maxY - minY);
     float offY = ((float)PREVIEW_H - (maxY - minY) * sy) * 0.5f;
+    previewTransform[index] = (PreviewTransform){ sx, sy, minY, offY };
 #define PV_X(wx) ((wx) * sx)
 #define PV_Y(wy) (((wy) - minY) * sy + offY)
 
@@ -1263,19 +1768,21 @@ static void BakeLevelPreview(int index)
     SetTextureFilter(levelPreviews[index].texture, TEXTURE_FILTER_BILINEAR);
 
     BeginTextureMode(levelPreviews[index]);
-    DrawRectangleGradientV(0, 0, PREVIEW_W, PREVIEW_H, (Color){ 150, 200, 240, 255 }, (Color){ 225, 240, 250, 255 });
+    DrawRectangleGradientV(0, 0, PREVIEW_W, PREVIEW_H, (Color) { 150, 200, 240, 255 }, (Color) { 225, 240, 250, 255 });
 
     for (int i = 0; i < solidCount; i++)
     {
         Color c;
         switch (solids[i].type)
         {
-            case SOLID_FLOATING: c = (Color){ 120, 160, 220, 255 }; break;
-            case SOLID_WALL:     c = (Color){ 90, 90, 100, 255 };  break;
-            default:             c = (Color){ 80, 130, 80, 255 };  break;
+        case SOLID_FLOATING:  c = currentPalette.floating; break;
+        case SOLID_WALL:      c = currentPalette.wall; break;
+        case SOLID_MOVING:    c = currentPalette.moving; break;
+        case SOLID_BREAKABLE: c = currentPalette.breakable; break;
+        case SOLID_PHASING:   c = currentPalette.phasing; break;
+        default:              c = currentPalette.ground; break;
         }
         Rectangle r = solids[i].rect;
-        // Keep thin platforms visible: at least 2px in each direction.
         Rectangle pr = { PV_X(r.x), PV_Y(r.y), fmaxf(r.width * sx, 2.0f), fmaxf(r.height * sy, 2.0f) };
         DrawRectangleRec(pr, c);
     }
@@ -1284,24 +1791,64 @@ static void BakeLevelPreview(int index)
         Rectangle r = spikes[i];
         float w = fmaxf(r.width * sx, 3.0f);
         Vector2 base = { PV_X(r.x), PV_Y(r.y + r.height) };
-        DrawTriangle((Vector2){ base.x, base.y }, (Vector2){ base.x + w * 0.5f, base.y - 4.0f },
-                     (Vector2){ base.x + w, base.y }, (Color){ 190, 40, 40, 255 });
+        DrawTriangle((Vector2) { base.x, base.y }, (Vector2) { base.x + w * 0.5f, base.y - 4.0f },
+            (Vector2) {
+            base.x + w, base.y
+        }, (Color) { 190, 40, 40, 255 });
     }
     for (int i = 0; i < enemyCount; i++)
-        DrawCircleV((Vector2){ PV_X(enemies[i].pos.x), PV_Y(enemies[i].pos.y) - 2.0f }, 2.4f, (Color){ 130, 40, 150, 255 });
+        DrawCircleV((Vector2) { PV_X(enemies[i].pos.x), PV_Y(enemies[i].pos.y) - 2.0f }, 2.4f, (Color) { 130, 40, 150, 255 });
     for (int i = 0; i < coinCount; i++)
-        DrawCircleV((Vector2){ PV_X(coins[i].pos.x), PV_Y(coins[i].pos.y) }, 2.0f, (Color){ 255, 215, 60, 255 });
+        DrawCircleV((Vector2) { PV_X(coins[i].pos.x), PV_Y(coins[i].pos.y) }, 2.0f, (Color) { 255, 215, 60, 255 });
     for (int i = 0; i < anchorCount; i++)
-        DrawCircleV((Vector2){ PV_X(anchors[i].x), PV_Y(anchors[i].y) }, 2.6f, (Color){ 90, 110, 170, 255 });
-    DrawRectangle((int)PV_X(goalRect.x) - 2, (int)PV_Y(goalRect.y) - 4, 6, (int)fmaxf(goalRect.height * sy, 8.0f) + 4, (Color){ 60, 190, 90, 255 });
-    DrawCircleV((Vector2){ PV_X(spawnPoint.x), PV_Y(spawnPoint.y) }, 3.4f, (Color){ 200, 60, 60, 255 });
+        DrawCircleV((Vector2) { PV_X(anchors[i].x), PV_Y(anchors[i].y) }, 2.6f, (Color) { 90, 110, 170, 255 });
+    DrawRectangle((int)PV_X(goalRect.x) - 2, (int)PV_Y(goalRect.y) - 4, 6, (int)fmaxf(goalRect.height * sy, 8.0f) + 4, (Color) { 60, 190, 90, 255 });
+    DrawCircleV((Vector2) { PV_X(spawnPoint.x), PV_Y(spawnPoint.y) }, 3.4f, (Color) { 200, 60, 60, 255 });
 
     EndTextureMode();
 #undef PV_X
 #undef PV_Y
 }
 
-// Builds the given level and resets all per-run state (also used for restart).
+static Vector2 MinimapProject(PreviewTransform tr, Rectangle box, Vector2 worldPos)
+{
+    return (Vector2) {
+        box.x + worldPos.x * tr.sx * (box.width / PREVIEW_W),
+            box.y + (worldPos.y - tr.minY) * tr.sy * (box.height / PREVIEW_H) + tr.offY * (box.height / PREVIEW_H)
+    };
+}
+
+static void DrawMinimap(int level, Vector2 playerCenter, float levelT, float realT)
+{
+    PreviewTransform tr = previewTransform[level];
+    Rectangle box = { SCREEN_W - PREVIEW_W * 0.5f - 16, 92, PREVIEW_W * 0.5f, PREVIEW_H * 0.5f };
+
+    DrawRectangleRec((Rectangle) { box.x - 4, box.y - 4, box.width + 8, box.height + 8 }, Fade(BLACK, 0.45f));
+    DrawTexturePro(levelPreviews[level].texture,
+        (Rectangle) {
+        0, 0, (float)PREVIEW_W, -(float)PREVIEW_H
+    },
+        box, (Vector2) { 0, 0 }, 0.0f, WHITE);
+    DrawRectangleLinesEx(box, 1.5f, (Color) { 230, 230, 235, 200 });
+
+    GhostSample ghost;
+    if (GetGhostSample(level, levelT, &ghost))
+    {
+        Vector2 gMark = MinimapProject(tr, box,
+            (Vector2) {
+            ghost.pos.x + PLAYER_W * 0.5f, ghost.pos.y + PLAYER_H * 0.5f
+        });
+        DrawCircleV(gMark, 3.0f, (Color) { 130, 210, 255, 230 });
+        DrawCircleLines((int)gMark.x, (int)gMark.y, 3.0f, (Color) { 20, 60, 100, 220 });
+    }
+
+    Vector2 mark = MinimapProject(tr, box, playerCenter);
+    float pulse = 0.7f + 0.3f * sinf(realT * 6.0f);
+    DrawCircleV(mark, 5.0f * pulse, Fade((Color) { 255, 60, 60, 255 }, 0.35f));
+    DrawCircleV(mark, 3.0f, (Color) { 255, 60, 60, 255 });
+    DrawCircleLines((int)mark.x, (int)mark.y, 3.0f, (Color) { 255, 255, 255, 220 });
+}
+
 static void StartLevel(int index, Player* p)
 {
     currentLevel = index;
@@ -1310,18 +1857,12 @@ static void StartLevel(int index, Player* p)
     p->facing = 1.0f;
     coinsCollected = 0;
     levelTime = 0.0f;
+    RecordingReset();
     cameraSmooth = PlayerCenter(p);
     speedIntensity = 0.0f;
     displaySpeed = 0.0f;
 }
 
-//------------------------------------------------------------------------------------
-// Grapple
-//------------------------------------------------------------------------------------
-
-// Whether the segment from origin, going maxDist along the unit vector dir,
-// intersects rectangle r. Built from raylib's own point/line collision
-// checks rather than a hand-rolled slab test.
 static bool SegmentHitsRect(Vector2 origin, Vector2 dir, float maxDist, Rectangle r)
 {
     Vector2 end = Vector2Add(origin, Vector2Scale(dir, maxDist));
@@ -1339,12 +1880,6 @@ static bool SegmentHitsRect(Vector2 origin, Vector2 dir, float maxDist, Rectangl
         || CheckCollisionLines(origin, end, bl, tl, NULL);
 }
 
-// The rope is only allowed to refuse shortening when a wall is genuinely
-// in the way of the player right now: it crosses the line from the anchor
-// to the player, AND the player's body is actually touching that same
-// wall. A slightly inflated player rect catches the case where they're
-// flush against it (MoveAndCollide stops them exactly at the surface,
-// not overlapping it).
 static bool ReelBlockedByWall(Player* p)
 {
     Vector2 center = PlayerCenter(p);
@@ -1365,8 +1900,6 @@ static bool ReelBlockedByWall(Player* p)
     return false;
 }
 
-// The anchor a grapple shot would attach to right now (nearest within range),
-// or -1. Shared by firing and the aim indicator so they always agree.
 static int FindBestAnchor(Player* p)
 {
     Vector2 center = PlayerCenter(p);
@@ -1394,7 +1927,7 @@ static void TryFireGrapple(Player* p)
         p->grappleAnchor = anchors[best];
         p->ropeLength = fmaxf(Vector2Distance(center, anchors[best]), GRAPPLE_MIN_LEN);
         p->ropeDirValid = false;
-        p->usedDoubleJump = false; // grappling refreshes the double jump for extra chaining fun
+        p->usedDoubleJump = false;
         Snd(sndGrapple);
         SpawnBurst(anchors[best], 10, 160.0f, 0.4f, 3.0f, (Color) { 70, 220, 255, 255 });
     }
@@ -1404,9 +1937,6 @@ static void UpdateGrapple(Player* p, float dt)
 {
     if (!p->grappling) return;
 
-    // Reel in / out. Shortening is refused while a wall sits between the
-    // anchor and the player and the player is touching it; lengthening is
-    // always allowed.
     if ((IsKeyDown(KEY_UP) || IsKeyDown(KEY_W)) && !ReelBlockedByWall(p))
     {
         p->ropeLength = Clamp(p->ropeLength - GRAPPLE_REEL_SPD * dt, GRAPPLE_MIN_LEN, GRAPPLE_RANGE);
@@ -1424,14 +1954,9 @@ static void UpdateGrapple(Player* p, float dt)
     {
         Vector2 dir = Vector2Normalize(diff);
 
-        // The player moved in a straight line this frame, so the rope direction
-        // turned by some angle. Turn the velocity by the same angle first;
-        // otherwise removing the "outward" part below deletes real speed every
-        // frame (worst on short ropes and low frame rates).
         if (p->ropeDirValid)
             p->velocity = Vector2Rotate(p->velocity, Vector2Angle(p->ropeDir, dir));
 
-        // Snap back onto the rope circle
         Vector2 newCenter = Vector2Add(p->grappleAnchor, Vector2Scale(dir, p->ropeLength));
         p->position.x = newCenter.x - PLAYER_W * 0.5f;
         p->position.y = newCenter.y - PLAYER_H * 0.5f;
@@ -1454,12 +1979,9 @@ static void UpdateGrapple(Player* p, float dt)
     }
     else
     {
-        // Slack rope: free flight, so the last direction no longer applies.
         p->ropeDirValid = false;
     }
 
-    // A steady trail of little sparks along the rope makes the swing read
-    // as "powered" rather than just a static line.
     if (GetRandomValue(0, 100) < 40)
     {
         float t = (float)GetRandomValue(20, 80) / 100.0f;
@@ -1468,12 +1990,6 @@ static void UpdateGrapple(Player* p, float dt)
     }
 }
 
-//------------------------------------------------------------------------------------
-// Drawing
-//------------------------------------------------------------------------------------
-//------------------------------------------------------------------------------------
-// Speed effects
-//------------------------------------------------------------------------------------
 static void UpdateSpeedStreaks(float dt)
 {
     for (int i = 0; i < MAX_STREAKS; i++)
@@ -1481,7 +1997,6 @@ static void UpdateSpeedStreaks(float dt)
         if (!streaks[i].alive) continue;
         streaks[i].life -= dt;
         if (streaks[i].life <= 0.0f) { streaks[i].alive = false; continue; }
-        // Streaks move opposite to player velocity, in screen space
         streaks[i].pos.x -= streaks[i].speed * 0.02f * (streaks[i].color.r > 200 ? 1.0f : -1.0f);
     }
 }
@@ -1494,12 +2009,10 @@ static void SpawnSpeedStreak(Vector2 playerVel, Vector2 screenCenter)
     {
         if (streaks[i].alive) continue;
 
-        // Spawn at edges of screen, biased perpendicular to motion
         float angle = atan2f(-playerVel.y, -playerVel.x);
         float spread = (GetRandomValue(0, 100) / 100.0f - 0.5f) * 2.0f;
         float perpAngle = angle + PI * 0.5f + spread * 0.8f;
 
-        // Distance from center scaled by how fast we're going
         float dist = 300.0f + (float)GetRandomValue(0, 200);
 
         streaks[i].pos.x = screenCenter.x + cosf(perpAngle) * dist + (float)GetRandomValue(-100, 100);
@@ -1517,15 +2030,13 @@ static void SpawnSpeedStreak(Vector2 playerVel, Vector2 screenCenter)
 
 static void DrawSpeedStreaks(Camera2D camera)
 {
-    Vector2 screenCenter = { SCREEN_W / 2.0f, SCREEN_H / 2.0f };
-    Vector2 playerVel = { 0, 0 }; // will be set externally
+    (void)camera;
 
     for (int i = 0; i < MAX_STREAKS; i++)
     {
         if (!streaks[i].alive) continue;
         float t = streaks[i].life / streaks[i].maxLife;
 
-        // Draw as horizontal-ish streak
         float length = 20.0f + speedIntensity * 80.0f;
         Color c = streaks[i].color;
         c.a = (unsigned char)(c.a * t);
@@ -1541,14 +2052,12 @@ static void DrawSpeedStreaks(Camera2D camera)
     }
 }
 
-// Radial speed lines emanating from screen edges when going fast
 static void DrawRadialSpeedLines(Vector2 playerVel, float intensity)
 {
     if (intensity < 0.05f) return;
 
     Vector2 center = { SCREEN_W / 2.0f, SCREEN_H / 2.0f };
 
-    // Direction of movement determines which side lines come from
     float moveAngle = atan2f(playerVel.y, playerVel.x);
 
     int numLines = (int)(30 * intensity);
@@ -1577,7 +2086,6 @@ static void DrawRadialSpeedLines(Vector2 playerVel, float intensity)
     }
 }
 
-// Vignette that intensifies with speed
 static void DrawSpeedVignette(float intensity)
 {
     if (intensity < 0.1f) return;
@@ -1585,7 +2093,6 @@ static void DrawSpeedVignette(float intensity)
     unsigned char alpha = (unsigned char)(intensity * 120);
     Color c = (Color){ 20, 10, 40, alpha };
 
-    // Draw gradient rectangles at edges
     int bandSize = (int)(60 + intensity * 120);
     for (int i = 0; i < bandSize; i++)
     {
@@ -1600,7 +2107,6 @@ static void DrawSpeedVignette(float intensity)
     }
 }
 
-// Chromatic aberration effect - draws red/blue offset copies at edges
 static void DrawChromaticAberration(float intensity)
 {
     if (intensity < 0.2f) return;
@@ -1608,16 +2114,13 @@ static void DrawChromaticAberration(float intensity)
     float offset = intensity * 6.0f;
     unsigned char alpha = (unsigned char)(intensity * 70);
 
-    // Simple edge tinting to fake chromatic aberration
     Color redTint = { 255, 0, 0, alpha };
     Color blueTint = { 0, 80, 255, alpha };
 
-    // Red on left edge, blue on right (or based on movement)
     DrawRectangle(0, 0, (int)(offset * 3), SCREEN_H, redTint);
     DrawRectangle(SCREEN_W - (int)(offset * 3), 0, (int)(offset * 3), SCREEN_H, blueTint);
 }
 
-// Motion trail ghosts
 static void UpdateTrailGhosts(Player* p, float dt)
 {
     for (int i = 0; i < MOTION_TRAIL_COUNT; i++)
@@ -1634,7 +2137,6 @@ static void UpdateTrailGhosts(Player* p, float dt)
         {
             trailTimer = 0.03f;
 
-            // Shift ghosts down
             for (int i = MOTION_TRAIL_COUNT - 1; i > 0; i--)
                 trailGhosts[i] = trailGhosts[i - 1];
 
@@ -1670,12 +2172,27 @@ static void DrawTrailGhosts(void)
     }
 }
 
-static void DrawParallaxBackground(Camera2D camera)
-{
-    // Sky gradient
-    DrawRectangleGradientV(0, 0, SCREEN_W, SCREEN_H, (Color) { 150, 200, 240, 255 }, (Color) { 225, 240, 250, 255 });
+//------------------------------------------------------------------------------------
+// Backgrounds
+//
+// bgTime advances continuously so clouds and smoke always drift. Each theme
+// has its own palette, gradient, and parallax props.
+//------------------------------------------------------------------------------------
 
-    // Far hills (slow parallax)
+// ---------------------------------------------------------------------------
+// Level 1 - meadow: warm sky, green hills, slow puffy clouds
+// ---------------------------------------------------------------------------
+static void DrawBgDefault(Camera2D camera, float t)
+{
+    DrawRectangleGradientV(0, 0, SCREEN_W, SCREEN_H,
+        (Color) {
+        150, 200, 240, 255
+    }, (Color) { 225, 240, 250, 255 });
+
+    // Sun
+    DrawCircleV((Vector2) { 180.0f - camera.target.x * 0.02f, 130.0f }, 46.0f, (Color) { 255, 245, 210, 220 });
+
+    // Far hills
     float p1 = camera.target.x * 0.15f;
     Color hillFar = (Color){ 170, 200, 175, 255 };
     for (int i = -1; i < 6; i++)
@@ -1684,7 +2201,7 @@ static void DrawParallaxBackground(Camera2D camera)
         DrawCircle((int)bx + 150, SCREEN_H - 40, 220, hillFar);
     }
 
-    // Near hills (faster parallax)
+    // Near hills
     float p2 = camera.target.x * 0.35f;
     Color hillNear = (Color){ 140, 185, 150, 255 };
     for (int i = -1; i < 6; i++)
@@ -1693,12 +2210,12 @@ static void DrawParallaxBackground(Camera2D camera)
         DrawCircle((int)bx + 120, SCREEN_H + 10, 170, hillNear);
     }
 
-    // Drifting clouds
-    float p3 = camera.target.x * 0.08f;
+    // Drifting clouds - bgTime pushes them slowly left so the sky feels alive
+    float p3 = camera.target.x * 0.08f + t * 12.0f;
     for (int i = -1; i < 5; i++)
     {
         float cx = i * 620.0f - fmodf(p3, 620.0f);
-        float cy = 90.0f + 40.0f * sinf((float)i * 1.7f);
+        float cy = 90.0f + 40.0f * sinf((float)i * 1.7f + t * 0.3f);
         Color cloud = (Color){ 255, 255, 255, 200 };
         DrawCircle((int)cx, (int)cy, 26, cloud);
         DrawCircle((int)cx + 28, (int)cy + 8, 20, cloud);
@@ -1706,14 +2223,402 @@ static void DrawParallaxBackground(Camera2D camera)
     }
 }
 
-// Input check for a rectangle button -- safe to call outside BeginDrawing.
+// ---------------------------------------------------------------------------
+// Level 2 - cavern: dark red rock, silhouetted pillars, rising embers
+// ---------------------------------------------------------------------------
+static void DrawBgCavern(Camera2D camera, float t)
+{
+    DrawRectangleGradientV(0, 0, SCREEN_W, SCREEN_H,
+        (Color) {
+        32, 14, 18, 255
+    }, (Color) { 92, 38, 30, 255 });
+
+    // Lava glow at the bottom of the screen, pulsing slowly
+    float pulse = 0.85f + 0.15f * sinf(t * 0.8f);
+    for (int r = 260; r > 0; r -= 20)
+    {
+        unsigned char a = (unsigned char)(8 + (260 - r) * 0.15f * pulse);
+        DrawCircleV((Vector2) { SCREEN_W * 0.5f, (float)SCREEN_H + 60.0f },
+            (float)r, (Color) { 255, 120, 40, a });
+    }
+
+    // Far stalactites/stalagmites (slow parallax)
+    float p1 = camera.target.x * 0.12f;
+    Color spireFar = (Color){ 52,  22,  22, 220 };
+    for (int i = -1; i < 8; i++)
+    {
+        float bx = i * 260.0f - fmodf(p1, 260.0f);
+        float h = 220.0f + 90.0f * sinf((float)i * 1.9f);
+        DrawTriangle((Vector2) { bx, 0.0f },
+            (Vector2) {
+            bx + 80.0f, 0.0f
+        },
+            (Vector2) {
+            bx + 40.0f, h
+        },
+            spireFar);
+        DrawTriangle((Vector2) { bx + 120.0f, (float)SCREEN_H },
+            (Vector2) {
+            bx + 220.0f, (float)SCREEN_H
+        },
+            (Vector2) {
+            bx + 170.0f, (float)SCREEN_H - h * 0.7f
+        },
+            spireFar);
+    }
+
+    // Near stalactites (faster parallax, darker)
+    float p2 = camera.target.x * 0.24f;
+    Color spireNear = (Color){ 24,  10,  12, 240 };
+    for (int i = -1; i < 7; i++)
+    {
+        float bx = i * 360.0f - fmodf(p2, 360.0f) + 40.0f;
+        float h = 300.0f + 120.0f * sinf((float)i * 2.3f + 0.7f);
+        DrawTriangle((Vector2) { bx, 0.0f },
+            (Vector2) {
+            bx + 110.0f, 0.0f
+        },
+            (Vector2) {
+            bx + 55.0f, h
+        },
+            spireNear);
+    }
+
+    // Slow-rising ember particles
+    for (int i = 0; i < 34; i++)
+    {
+        float seed = (float)i * 41.7f;
+        float x = fmodf(seed * 47.0f + t * 8.0f, (float)SCREEN_W);
+        float y = (float)SCREEN_H - fmodf(t * (12.0f + fmodf(seed, 20.0f)) + seed * 9.0f, (float)SCREEN_H);
+        float tw = 0.5f + 0.5f * sinf(t * 3.0f + seed);
+        unsigned char a = (unsigned char)(120 + tw * 120);
+        DrawCircleV((Vector2) { x, y }, 1.4f + tw, (Color) { 255, 160, 70, a });
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Level 3 - sky islands: deep blue gradient, layered clouds, city skyline
+// with FIXED building heights (baked once, not re-rolled per frame).
+// ---------------------------------------------------------------------------
+#define CITY_MAX_BUILDINGS 40
+typedef struct {
+    float x;
+    float w;
+    float h;
+    float parallax;
+    unsigned char shade;   // 0..255, used for tint
+    bool  antenna;
+} CityBuilding;
+
+static CityBuilding cityBuildings[CITY_MAX_BUILDINGS];
+static int          cityBuildingCount = 0;
+static bool         cityBaked = false;
+
+static void BakeCityBuildings(void)
+{
+    cityBuildingCount = 0;
+    unsigned int seed = 0xC0FFEEu;
+
+    // Two layers: far (parallax 0.10) and near (parallax 0.20). Both are
+    // baked once so the skyline stays rock-steady as the camera moves.
+    for (int layer = 0; layer < 2; layer++)
+    {
+        float parallax = (layer == 0) ? 0.10f : 0.20f;
+        float baseX = -200.0f + layer * 90.0f;
+        float span = (layer == 0) ? 240.0f : 200.0f;
+
+        for (int i = 0; i < 20 && cityBuildingCount < CITY_MAX_BUILDINGS; i++)
+        {
+            seed = seed * 1664525u + 1013904223u;
+            float r1 = (float)((seed >> 8) & 0xFFFF) / 65535.0f;
+            seed = seed * 1664525u + 1013904223u;
+            float r2 = (float)((seed >> 8) & 0xFFFF) / 65535.0f;
+
+            CityBuilding b = { 0 };
+            b.parallax = parallax;
+            b.x = baseX + i * span + r1 * 40.0f;
+
+            float hBase = (layer == 0) ? 160.0f : 240.0f;
+            float hVar = (layer == 0) ? 120.0f : 160.0f;
+            b.h = hBase + r2 * hVar;
+
+            b.w = (layer == 0) ? (70.0f + r1 * 30.0f) : (90.0f + r2 * 30.0f);
+            b.shade = (unsigned char)(layer == 0 ? 90 : 60);
+            b.antenna = (r1 > 0.55f);
+
+            cityBuildings[cityBuildingCount++] = b;
+        }
+    }
+    cityBaked = true;
+}
+
+static void DrawBgSky(Camera2D camera, float t)
+{
+    if (!cityBaked) BakeCityBuildings();
+
+    DrawRectangleGradientV(0, 0, SCREEN_W, SCREEN_H,
+        (Color) {
+        90, 160, 230, 255
+    }, (Color) { 215, 235, 250, 255 });
+
+    // Sun disc
+    {
+        Vector2 sun = { 200.0f - camera.target.x * 0.03f, 140.0f };
+        for (int r = 120; r > 0; r -= 12)
+        {
+            unsigned char a = (unsigned char)(8 + (120 - r) * 0.25f);
+            DrawCircleV(sun, (float)r, (Color) { 255, 245, 210, a });
+        }
+        DrawCircleV(sun, 42.0f, (Color) { 255, 250, 225, 235 });
+    }
+
+    // Baked skyline (fixed heights). Only the horizontal offset changes with
+    // the camera; buildings never jitter or re-randomise.
+    for (int i = 0; i < cityBuildingCount; i++)
+    {
+        CityBuilding* b = &cityBuildings[i];
+        float screenX = b->x - camera.target.x * b->parallax;
+        float wrapW = 4000.0f;   // enough to cover the widest level
+        screenX = fmodf(screenX, wrapW);
+        if (screenX < -400.0f) screenX += wrapW;
+        if (screenX > SCREEN_W + 400.0f) continue;
+
+        Color c = (Color){ b->shade, (unsigned char)(b->shade + 30),
+                           (unsigned char)(b->shade + 60), 200 };
+        DrawRectangle((int)screenX, (int)(SCREEN_H - b->h), (int)b->w, (int)b->h, c);
+
+        if (b->antenna)
+            DrawRectangle((int)(screenX + b->w * 0.5f - 2),
+                (int)(SCREEN_H - b->h - 20), 4, 20, c);
+    }
+
+    // Drifting cloud layers - three depths, all advancing with bgTime
+    float pC1 = camera.target.x * 0.05f + t * 6.0f;
+    for (int i = -1; i < 6; i++)
+    {
+        float cx = i * 520.0f - fmodf(pC1, 520.0f);
+        float cy = 130.0f + 30.0f * sinf((float)i * 1.4f + t * 0.4f);
+        Color c = (Color){ 255, 255, 255, 130 };
+        DrawCircle((int)cx, (int)cy, 28, c);
+        DrawCircle((int)cx + 34, (int)cy + 6, 22, c);
+        DrawCircle((int)cx - 30, (int)cy + 8, 20, c);
+    }
+
+    float pC2 = camera.target.x * 0.12f + t * 14.0f;
+    for (int i = -1; i < 5; i++)
+    {
+        float cx = i * 460.0f - fmodf(pC2, 460.0f);
+        float cy = 260.0f + 45.0f * sinf((float)i * 1.9f + 1.1f + t * 0.5f);
+        Color c = (Color){ 255, 255, 255, 190 };
+        DrawCircle((int)cx, (int)cy, 36, c);
+        DrawCircle((int)cx + 42, (int)cy + 10, 28, c);
+        DrawCircle((int)cx - 40, (int)cy + 12, 26, c);
+        DrawCircle((int)cx + 12, (int)cy - 18, 24, c);
+    }
+
+    float pC3 = camera.target.x * 0.22f + t * 26.0f;
+    for (int i = -1; i < 4; i++)
+    {
+        float cx = i * 560.0f - fmodf(pC3, 560.0f);
+        float cy = 480.0f + 55.0f * sinf((float)i * 2.2f + 0.4f + t * 0.6f);
+        Color c = (Color){ 255, 255, 255, 235 };
+        DrawCircle((int)cx, (int)cy, 48, c);
+        DrawCircle((int)cx + 56, (int)cy + 14, 36, c);
+        DrawCircle((int)cx - 52, (int)cy + 16, 34, c);
+        DrawCircle((int)cx + 18, (int)cy - 24, 32, c);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Level 4 - dusk city: warm orange sky, silhouetted skyline, distant windows
+// ---------------------------------------------------------------------------
+static void DrawBgCity(Camera2D camera, float t)
+{
+    if (!cityBaked) BakeCityBuildings();
+
+    DrawRectangleGradientV(0, 0, SCREEN_W, SCREEN_H,
+        (Color) {
+        60, 40, 90, 255
+    }, (Color) { 240, 150, 90, 255 });
+
+    // Setting sun low on the horizon
+    {
+        Vector2 sun = { SCREEN_W * 0.7f - camera.target.x * 0.02f, SCREEN_H - 120.0f };
+        for (int r = 200; r > 0; r -= 14)
+        {
+            unsigned char a = (unsigned char)(10 + (200 - r) * 0.10f);
+            DrawCircleV(sun, (float)r, (Color) { 255, 200, 120, a });
+        }
+        DrawCircleV(sun, 70.0f, (Color) { 255, 220, 160, 230 });
+    }
+
+    // Baked skyline - same buildings as level 3, but tinted for dusk and
+    // with lit windows scattered across their faces.
+    for (int i = 0; i < cityBuildingCount; i++)
+    {
+        CityBuilding* b = &cityBuildings[i];
+        float screenX = b->x - camera.target.x * b->parallax;
+        float wrapW = 4000.0f;
+        screenX = fmodf(screenX, wrapW);
+        if (screenX < -400.0f) screenX += wrapW;
+        if (screenX > SCREEN_W + 400.0f) continue;
+
+        Color c = (Color){ 30, 26, 46, 220 };
+        DrawRectangle((int)screenX, (int)(SCREEN_H - b->h), (int)b->w, (int)b->h, c);
+        if (b->antenna)
+            DrawRectangle((int)(screenX + b->w * 0.5f - 2),
+                (int)(SCREEN_H - b->h - 20), 4, 20, c);
+
+        // Scattered lit windows - deterministic so they don't flicker
+        int winCols = (int)(b->w / 16.0f);
+        int winRows = (int)(b->h / 22.0f);
+        for (int wy = 0; wy < winRows; wy++)
+        {
+            for (int wx = 0; wx < winCols; wx++)
+            {
+                unsigned int h = (unsigned int)(i * 131 + wx * 17 + wy * 7);
+                if ((h & 3) == 0)   // ~25% of slots lit
+                {
+                    float px = screenX + 6.0f + wx * 16.0f;
+                    float py = SCREEN_H - b->h + 8.0f + wy * 22.0f;
+                    unsigned char warm = (unsigned char)(180 + (h & 63));
+                    float flick = 0.85f + 0.15f * sinf(t * 1.7f + (float)(h & 31));
+                    DrawRectangle((int)px, (int)py, 6, 10,
+                        (Color) {
+                        255, warm, 120, (unsigned char)(220 * flick)
+                    });
+                }
+            }
+        }
+    }
+
+    // Thin smoke layer drifting across the horizon
+    float pS = camera.target.x * 0.08f + t * 22.0f;
+    for (int i = -1; i < 6; i++)
+    {
+        float cx = i * 480.0f - fmodf(pS, 480.0f);
+        float cy = SCREEN_H - 180.0f + 30.0f * sinf((float)i * 1.5f + t * 0.4f);
+        Color c = (Color){ 200, 170, 200, 60 };
+        DrawCircle((int)cx, (int)cy, 60, c);
+        DrawCircle((int)cx + 70, (int)cy + 8, 50, c);
+        DrawCircle((int)cx - 60, (int)cy + 10, 46, c);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Level 5 - clocktower interior: brass rings, faceless clock, dust motes
+// ---------------------------------------------------------------------------
+static void DrawGearRing(Vector2 center, float radius, float thickness,
+    int teeth, float toothLen, float rot, Color color)
+{
+    DrawRing(center, radius, radius + thickness, 0.0f, 360.0f, 96, color);
+    for (int i = 0; i < teeth; i++)
+    {
+        float a = rot + (2.0f * PI * (float)i) / (float)teeth;
+        Vector2 inner = {
+            center.x + cosf(a) * (radius + thickness),
+            center.y + sinf(a) * (radius + thickness)
+        };
+        Vector2 outer = {
+            center.x + cosf(a) * (radius + thickness + toothLen),
+            center.y + sinf(a) * (radius + thickness + toothLen)
+        };
+        DrawLineEx(inner, outer, thickness * 1.1f, color);
+    }
+}
+
+static void DrawBgTower(Camera2D camera, float t)
+{
+    DrawRectangleGradientV(0, 0, SCREEN_W, SCREEN_H,
+        (Color) {
+        58, 36, 22, 255
+    },
+        (Color) {
+        118, 78, 42, 255
+    });
+
+    // Vertical pillars
+    float pPillar = camera.target.x * 0.10f;
+    Color pillar = (Color){ 40,  24,  14, 220 };
+    Color pillarLit = (Color){ 150, 100,  50, 180 };
+    for (int i = -1; i < 6; i++)
+    {
+        float bx = i * 340.0f - fmodf(pPillar, 340.0f);
+        DrawRectangle((int)bx, 0, 34, SCREEN_H, pillar);
+        DrawRectangle((int)bx + 8, 0, 3, SCREEN_H, pillarLit);
+        for (int y = 20; y < SCREEN_H; y += 60)
+            DrawCircle((int)bx + 17, y, 2.2f, (Color) { 200, 150, 80, 160 });
+    }
+
+    // Faceless clock face
+    Vector2 clockCenter = {
+        SCREEN_W * 0.5f - (camera.target.x - worldWidth * 0.5f) * 0.06f,
+        SCREEN_H * 0.48f - (camera.target.y - (worldTopY + worldBottomY) * 0.5f) * 0.06f
+    };
+
+    DrawCircleV(clockCenter, 340.0f, (Color) { 46, 28, 16, 220 });
+    DrawCircleV(clockCenter, 320.0f, (Color) { 180, 130, 70, 255 });
+    DrawCircleV(clockCenter, 300.0f, (Color) { 30, 20, 14, 255 });
+    DrawCircleV(clockCenter, 288.0f, (Color) { 220, 190, 130, 255 });
+    DrawCircleV(clockCenter, 270.0f, (Color) { 46, 28, 16, 255 });
+    DrawCircleV(clockCenter, 250.0f, (Color) { 108, 72, 40, 255 });
+
+    for (int i = 0; i < 12; i++)
+    {
+        float a = (2.0f * PI * (float)i) / 12.0f - PI * 0.5f;
+        Vector2 inner = { clockCenter.x + cosf(a) * 235.0f, clockCenter.y + sinf(a) * 235.0f };
+        Vector2 outer = { clockCenter.x + cosf(a) * 268.0f, clockCenter.y + sinf(a) * 268.0f };
+        DrawLineEx(inner, outer, 7.0f, (Color) { 230, 200, 140, 255 });
+    }
+    for (int i = 0; i < 60; i++)
+    {
+        if (i % 5 == 0) continue;
+        float a = (2.0f * PI * (float)i) / 60.0f - PI * 0.5f;
+        Vector2 p = { clockCenter.x + cosf(a) * 258.0f, clockCenter.y + sinf(a) * 258.0f };
+        DrawCircleV(p, 1.8f, (Color) { 200, 170, 110, 200 });
+    }
+
+    DrawGearRing(clockCenter, 150.0f, 10.0f, 24, 12.0f, t * 0.35f, (Color) { 180, 130, 70, 255 });
+    DrawGearRing(clockCenter, 88.0f, 10.0f, 16, 10.0f, -t * 0.55f, (Color) { 200, 150, 80, 255 });
+    DrawGearRing(clockCenter, 40.0f, 8.0f, 10, 8.0f, t * 0.90f, (Color) { 220, 180, 110, 255 });
+
+    DrawCircleV(clockCenter, 18.0f, (Color) { 60, 40, 22, 255 });
+    DrawCircleV(clockCenter, 12.0f, (Color) { 230, 200, 140, 255 });
+
+    Vector2 g1 = { 160.0f - camera.target.x * 0.04f, 180.0f + camera.target.y * 0.02f };
+    Vector2 g2 = { SCREEN_W - 180.0f + camera.target.x * 0.03f, 220.0f - camera.target.y * 0.02f };
+    DrawGearRing(g1, 70.0f, 8.0f, 16, 8.0f, t * 0.7f, (Color) { 150, 105, 60, 200 });
+    DrawGearRing(g2, 90.0f, 9.0f, 20, 9.0f, -t * 0.5f, (Color) { 150, 105, 60, 200 });
+
+    for (int i = 0; i < 40; i++)
+    {
+        float seed = (float)i * 27.31f;
+        float x = fmodf(seed * 41.0f, (float)SCREEN_W);
+        float y = SCREEN_H - fmodf(t * (25.0f + fmodf(seed, 40.0f)) + seed * 17.0f, (float)SCREEN_H);
+        float tw = 0.5f + 0.5f * sinf(t * 2.5f + seed);
+        unsigned char a = (unsigned char)(60 + tw * 120);
+        DrawCircleV((Vector2) { x, y }, 1.6f + tw * 1.0f, (Color) { 255, 220, 150, a });
+    }
+}
+
+static void DrawBackground(Camera2D camera, float time)
+{
+    switch (currentBgTheme)
+    {
+    case BG_CAVERN: DrawBgCavern(camera, time); break;
+    case BG_SKY:    DrawBgSky(camera, time);    break;
+    case BG_CITY:   DrawBgCity(camera, time);   break;
+    case BG_TOWER:  DrawBgTower(camera, time);  break;
+    default:        DrawBgDefault(camera, time); break;
+    }
+}
+
 static bool IsButtonClicked(Rectangle rect)
 {
     return CheckCollisionPointRec(GetMousePosition(), rect) && IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
 }
 
-// Draws a button, highlighted and slightly enlarged while the mouse hovers it.
-static void DrawButton(Rectangle rect, const char *label, int fontSize)
+static void DrawButton(Rectangle rect, const char* label, int fontSize)
 {
     bool hovered = CheckCollisionPointRec(GetMousePosition(), rect);
     Rectangle r = rect;
@@ -1723,7 +2628,7 @@ static void DrawButton(Rectangle rect, const char *label, int fontSize)
     }
 
     Color border = (Color){ 40, 40, 60, 255 };
-    Color bg = hovered ? (Color){ 250, 220, 120, 255 } : (Color){ 235, 235, 245, 255 };
+    Color bg = hovered ? (Color) { 250, 220, 120, 255 } : (Color) { 235, 235, 245, 255 };
 
     Rectangle shadow = { r.x + 3, r.y + 5, r.width, r.height };
     DrawRectangleRounded(shadow, 0.3f, 8, Fade(BLACK, 0.25f));
@@ -1732,10 +2637,9 @@ static void DrawButton(Rectangle rect, const char *label, int fontSize)
 
     int tw = MeasureText(label, fontSize);
     DrawText(label, (int)(r.x + r.width * 0.5f - tw * 0.5f),
-             (int)(r.y + r.height * 0.5f - fontSize * 0.5f), fontSize, border);
+        (int)(r.y + r.height * 0.5f - fontSize * 0.5f), fontSize, border);
 }
 
-// A level-select card: big number, name, and best time. Grows when hovered.
 static void DrawLevelCard(Rectangle rect, int number, const char* name, float best, Texture2D preview)
 {
     bool hovered = CheckCollisionPointRec(GetMousePosition(), rect);
@@ -1746,9 +2650,9 @@ static void DrawLevelCard(Rectangle rect, int number, const char* name, float be
     }
 
     Color border = (Color){ 40, 40, 60, 255 };
-    Color bg = hovered ? (Color){ 250, 220, 120, 255 } : (Color){ 235, 235, 245, 255 };
+    Color bg = hovered ? (Color) { 250, 220, 120, 255 } : (Color) { 235, 235, 245, 255 };
 
-    DrawRectangleRounded((Rectangle){ r.x + 4, r.y + 6, r.width, r.height }, 0.12f, 8, Fade(BLACK, 0.25f));
+    DrawRectangleRounded((Rectangle) { r.x + 4, r.y + 6, r.width, r.height }, 0.12f, 8, Fade(BLACK, 0.25f));
     DrawRectangleRounded(r, 0.12f, 8, bg);
     DrawRectangleRoundedLinesEx(r, 0.12f, 8, 2.0f, border);
 
@@ -1761,18 +2665,19 @@ static void DrawLevelCard(Rectangle rect, int number, const char* name, float be
     DrawText(name, (int)(r.x + r.width * 0.5f - lw * 0.5f), (int)(r.y + 74), 24, border);
 
     Rectangle pv = { r.x + 16, r.y + 108, r.width - 32, (r.width - 32) * PREVIEW_H / PREVIEW_W };
-    DrawTexturePro(preview, (Rectangle){ 0, 0, (float)preview.width, -(float)preview.height }, pv,
-                   (Vector2){ 0, 0 }, 0.0f, WHITE);
+    DrawTexturePro(preview, (Rectangle) { 0, 0, (float)preview.width, -(float)preview.height }, pv,
+        (Vector2) {
+        0, 0
+    }, 0.0f, WHITE);
     DrawRectangleLinesEx(pv, 2.0f, border);
 
     char bestText[32];
     if (best > 0.0f) snprintf(bestText, sizeof(bestText), "Best: %05.2fs", best);
     else snprintf(bestText, sizeof(bestText), "Best: --");
     int bw = MeasureText(bestText, 18);
-    DrawText(bestText, (int)(r.x + r.width * 0.5f - bw * 0.5f), (int)(r.y + r.height - 32), 18, (Color){ 90, 90, 110, 255 });
+    DrawText(bestText, (int)(r.x + r.width * 0.5f - bw * 0.5f), (int)(r.y + r.height - 32), 18, (Color) { 90, 90, 110, 255 });
 }
 
-// Deterministic twinkling starfield overlay (no particle/physics state needed).
 static void DrawTwinkleStars(float time)
 {
     for (int i = 0; i < 40; i++)
@@ -1785,23 +2690,102 @@ static void DrawTwinkleStars(float time)
     }
 }
 
-static void DrawSolid(Solid *s)
+static void DrawSolid(Solid* s)
 {
+    if (s->type == SOLID_BREAKABLE && s->broken) return;
+
+    bool phasedOff = (s->type == SOLID_PHASING && s->phasedOut);
+
     Color c;
     switch (s->type)
     {
-    case SOLID_FLOATING: c = (Color){ 120, 160, 220, 255 }; break;
-    case SOLID_WALL:     c = (Color){ 90, 90, 100, 255 }; break;
-    default:             c = (Color){ 80, 130, 80, 255 }; break;
+    case SOLID_FLOATING:  c = currentPalette.floating; break;
+    case SOLID_WALL:      c = currentPalette.wall; break;
+    case SOLID_GROUND:    c = currentPalette.ground; break;
+    case SOLID_MOVING:    c = currentPalette.moving; break;
+    case SOLID_BREAKABLE: c = currentPalette.breakable; break;
+    case SOLID_PHASING:   c = currentPalette.phasing; break;
+    default:              c = GRAY; break;
     }
+
+    if (phasedOff)
+    {
+        DrawRectangleLinesEx(s->rect, 2, Fade(c, 0.35f));
+        return;
+    }
+
     DrawRectangleRec(s->rect, c);
     DrawRectangleLinesEx(s->rect, 2, (Color) { 30, 30, 30, 255 });
+
     if (s->type == SOLID_GROUND)
     {
-        DrawRectangle((int)s->rect.x, (int)s->rect.y, (int)s->rect.width, 8, (Color) { 110, 190, 90, 255 });
+        DrawRectangle((int)s->rect.x, (int)s->rect.y, (int)s->rect.width, 8, currentPalette.groundTop);
+    }
+
+    if (s->type == SOLID_BREAKABLE)
+    {
+        float t = (s->breakDelay > 0.0f) ? (s->breakTimer / s->breakDelay) : 0.0f;
+        if (t > 0.0f)
+        {
+            int numCracks = 1 + (int)(t * 4.0f);
+            for (int i = 0; i < numCracks; i++)
+            {
+                float fx = s->rect.x + s->rect.width * (0.15f + 0.18f * i);
+                DrawLine((int)fx, (int)s->rect.y,
+                    (int)(fx + 6.0f), (int)(s->rect.y + s->rect.height),
+                    (Color) {
+                    60, 30, 10, (unsigned char)(120 + t * 135)
+                });
+            }
+            if (t > 0.5f)
+            {
+                float pulse = 0.5f + 0.5f * sinf((float)GetTime() * 30.0f);
+                unsigned char a = (unsigned char)((t - 0.5f) * 2.0f * 130 * pulse);
+                DrawRectangleRec(s->rect, (Color) { 255, 60, 20, a });
+            }
+        }
+    }
+
+    if (s->type == SOLID_MOVING)
+    {
+        Vector2 pathEnd = Vector2Add(s->moveOrigin, s->moveVec);
+        for (int k = 0; k <= 12; k++)
+        {
+            Vector2 pp = Vector2Lerp(s->moveOrigin, pathEnd, k / 12.0f);
+            DrawCircleV((Vector2) {
+                pp.x + s->rect.width * 0.5f,
+                    pp.y + s->rect.height * 0.5f
+            },
+                1.5f, Fade(currentPalette.moving, 0.35f));
+        }
+        Vector2 center = { s->rect.x + s->rect.width * 0.5f,
+                           s->rect.y + s->rect.height * 0.5f };
+        Vector2 dir = Vector2Normalize(s->moveVec);
+        if (Vector2Length(s->moveVec) > 0.1f)
+        {
+            Vector2 a = Vector2Add(center, Vector2Scale(dir, -10));
+            Vector2 b = Vector2Add(center, Vector2Scale(dir, 10));
+            DrawLineEx(a, b, 2, Fade((Color) { 20, 20, 20, 255 }, 0.7f));
+        }
+    }
+
+    if (s->type == SOLID_PHASING)
+    {
+        float cycle = s->phaseOnTime + s->phaseOffTime;
+        if (cycle > 0.0f)
+        {
+            float t = fmodf(s->phaseTimer + s->phaseOffset, cycle);
+            float glow = (t < s->phaseOnTime)
+                ? (0.6f + 0.4f * sinf((float)GetTime() * 6.0f))
+                : 0.0f;
+            if (glow > 0.0f)
+                DrawRectangleRec(s->rect, Fade(WHITE, glow * 0.25f));
+        }
     }
 }
 
+// Spikes: always opaque, with a bright highlight on top so they stay visible
+// against any background (especially the brass clock face).
 static void DrawSpike(Rectangle r)
 {
     int teeth = (int)(r.width / 20);
@@ -1812,12 +2796,23 @@ static void DrawSpike(Rectangle r)
         Vector2 p1 = { r.x + i * tw,           r.y + r.height };
         Vector2 p2 = { r.x + (i + 0.5f) * tw,  r.y };
         Vector2 p3 = { r.x + (i + 1) * tw,     r.y + r.height };
+
+        // Solid body
         DrawTriangle(p1, p2, p3, (Color) { 190, 40, 40, 255 });
-        DrawTriangleLines(p1, p2, p3, (Color) { 90, 10, 10, 255 });
+
+        // Bright bevel on the left face for depth
+        Vector2 mid = { (p1.x + p2.x) * 0.5f, (p1.y + p2.y) * 0.5f };
+        Vector2 midBase = { (p1.x + p3.x) * 0.5f, p1.y };
+        DrawTriangle(p1, mid, midBase, (Color) { 230, 90, 90, 255 });
+
+        // Dark outline (always visible, never transparent)
+        DrawTriangleLines(p1, p2, p3, (Color) { 60, 6, 6, 255 });
+
+        // Bright tip highlight
+        DrawCircleV(p2, 2.0f, (Color) { 255, 210, 210, 255 });
     }
 }
 
-// Dots marching from a toward b, so the aim line reads as "pulling toward" the target.
 static void DrawDottedLine(Vector2 a, Vector2 b, float time, Color color)
 {
     const float spacing = 16.0f;
@@ -1830,8 +2825,6 @@ static void DrawDottedLine(Vector2 a, Vector2 b, float time, Color color)
 
 static void DrawAnchor(Vector2 a, bool inRange)
 {
-    // Hollow targeting ring + crosshair in cyan/slate, so anchors can't be
-    // mistaken for the solid gold coins.
     Color c = inRange ? (Color) { 70, 220, 255, 255 } : (Color) { 90, 110, 170, 255 };
     DrawCircleV(a, 12, (Color) { 25, 35, 65, 255 });
     DrawRing(a, 9, 12, 0, 360, 24, c);
@@ -1869,7 +2862,6 @@ static void DrawPlayer(Player* p)
     float eyeX = draw.x + draw.width * 0.5f + p->facing * 8.0f;
     DrawCircle((int)eyeX, (int)(draw.y + draw.height * 0.32f), 3, WHITE);
 
-    // simple motion streaks when moving fast, for extra speed sensation
     float speed = fabsf(p->velocity.x);
     if (speed > MAX_RUN_SPEED * 0.9f && p->onGround)
     {
@@ -1883,13 +2875,261 @@ static void DrawPlayer(Player* p)
     }
 }
 
-//------------------------------------------------------------------------------------
-// Main
-//------------------------------------------------------------------------------------
+static void DrawEditorGrid(Camera2D camera)
+{
+    Vector2 topLeft = GetScreenToWorld2D((Vector2) { 0, 0 }, camera);
+    Vector2 bottomRight = GetScreenToWorld2D((Vector2) { SCREEN_W, SCREEN_H }, camera);
+    float step = EDITOR_GRID * 4.0f;
+    float startX = floorf(topLeft.x / step) * step;
+    float startY = floorf(topLeft.y / step) * step;
+    Color gridColor = (Color){ 255, 255, 255, 35 };
+
+    for (float x = startX; x < bottomRight.x; x += step)
+        DrawLine((int)x, (int)topLeft.y, (int)x, (int)bottomRight.y, gridColor);
+    for (float y = startY; y < bottomRight.y; y += step)
+        DrawLine((int)topLeft.x, (int)y, (int)bottomRight.x, (int)y, gridColor);
+}
+
+static void DrawEditorMarkers(void)
+{
+    DrawRectangleRec(goalRect, (Color) { 230, 230, 230, 255 });
+    DrawRectangleLinesEx(goalRect, 2, (Color) { 40, 40, 60, 255 });
+    DrawText("GOAL", (int)goalRect.x - 4, (int)goalRect.y - 22, 16, (Color) { 255, 230, 120, 255 });
+
+    Rectangle sr = { spawnPoint.x, spawnPoint.y, PLAYER_W, PLAYER_H };
+    DrawRectangleLinesEx(sr, 2, (Color) { 80, 220, 120, 255 });
+    DrawText("SPAWN", (int)sr.x - 8, (int)sr.y - 22, 16, (Color) { 120, 255, 160, 255 });
+}
+
+static void EditorPlaceRect(EditorTool tool, Vector2 a, Vector2 b)
+{
+    float x0 = fminf(a.x, b.x), y0 = fminf(a.y, b.y);
+    float w = fabsf(b.x - a.x), h = fabsf(b.y - a.y);
+    bool isClick = (w < 12.0f && h < 12.0f);
+
+    switch (tool)
+    {
+    case TOOL_GROUND:
+        if (isClick) { w = 160.0f; h = 100.0f; }
+        if (w < EDITOR_GRID) w = EDITOR_GRID;
+        if (h < EDITOR_GRID) h = EDITOR_GRID;
+        AddSolid(x0, y0, w, h, SOLID_GROUND);
+        break;
+    case TOOL_FLOATING:
+        if (isClick) { w = 160.0f; h = 30.0f; }
+        if (w < EDITOR_GRID) w = EDITOR_GRID;
+        if (h < 12.0f) h = 12.0f;
+        AddSolid(x0, y0, w, h, SOLID_FLOATING);
+        break;
+    case TOOL_WALL:
+        if (isClick) { w = 30.0f; h = 110.0f; }
+        if (w < 12.0f) w = 12.0f;
+        if (h < EDITOR_GRID) h = EDITOR_GRID;
+        AddSolid(x0, y0, w, h, SOLID_WALL);
+        break;
+    case TOOL_SPIKE:
+        if (isClick) { w = 90.0f; h = 20.0f; }
+        if (w < 20.0f) w = 20.0f;
+        if (h < 10.0f) h = 10.0f;
+        AddSpike(x0, y0, w, h);
+        break;
+    default: break;
+    }
+    RecalcCustomWorldBounds();
+}
+
+static void EditorPlaceEnemy(Vector2 a, Vector2 b)
+{
+    float minX = fminf(a.x, b.x), maxX = fmaxf(a.x, b.x);
+    if (maxX - minX < 20.0f) { minX = a.x - 100.0f; maxX = a.x + 100.0f; }
+    AddEnemy((minX + maxX) * 0.5f, a.y, minX, maxX, 90.0f);
+    RecalcCustomWorldBounds();
+}
+
+static void RunEditor(Camera2D* camera, GameState* state, Player* player, bool* won, float dt)
+{
+    float panSpeed = 600.0f / editorZoom;
+    if (IsKeyDown(KEY_RIGHT) || IsKeyDown(KEY_D)) editorCamTarget.x += panSpeed * dt;
+    if (IsKeyDown(KEY_LEFT) || IsKeyDown(KEY_A)) editorCamTarget.x -= panSpeed * dt;
+    if (IsKeyDown(KEY_DOWN) || IsKeyDown(KEY_S)) editorCamTarget.y += panSpeed * dt;
+    if (IsKeyDown(KEY_UP) || IsKeyDown(KEY_W)) editorCamTarget.y -= panSpeed * dt;
+    float wheel = GetMouseWheelMove();
+    if (wheel != 0.0f) editorZoom = Clamp(editorZoom + wheel * 0.1f, 0.35f, 2.0f);
+
+    camera->target = editorCamTarget;
+    camera->zoom = editorZoom;
+    camera->offset = (Vector2){ SCREEN_W / 2.0f, SCREEN_H / 2.0f };
+
+    const int n = NUM_EDITOR_TOOLS;
+    float btnW = 128.0f, btnH = 44.0f, gap = 6.0f;
+    float totalW = n * btnW + (n - 1) * gap;
+    float startX = (SCREEN_W - totalW) * 0.5f;
+    Rectangle toolButtons[NUM_EDITOR_TOOLS];
+    for (int i = 0; i < n; i++)
+        toolButtons[i] = (Rectangle){ startX + i * (btnW + gap), 12, btnW, btnH };
+
+    const char* actionLabels[5] = { "SAVE", "LOAD", "CLEAR", "PLAY (P)", "BACK" };
+    float aBtnW = 170.0f, aBtnH = 44.0f, aGap = 10.0f;
+    float aTotalW = 5 * aBtnW + 4 * aGap;
+    float aStartX = (SCREEN_W - aTotalW) * 0.5f;
+    Rectangle actionButtons[5];
+    for (int i = 0; i < 5; i++)
+        actionButtons[i] = (Rectangle){ aStartX + i * (aBtnW + aGap), 64, aBtnW, aBtnH };
+
+    Vector2 mouse = GetMousePosition();
+    Rectangle uiPanel = { 0, 0, SCREEN_W, 118 };
+    bool overUI = CheckCollisionPointRec(mouse, uiPanel);
+
+    for (int i = 0; i < n; i++)
+        if (IsButtonClicked(toolButtons[i])) { editorTool = (EditorTool)i; Snd(sndCoin); }
+    for (int i = 0; i < n; i++)
+        if (IsKeyPressed(KEY_ONE + i)) editorTool = (EditorTool)i;
+
+    if (IsButtonClicked(actionButtons[0])) SaveCustomLevel();
+    if (IsButtonClicked(actionButtons[1]))
+        EditorStatus(LoadCustomLevel() ? "Loaded!" : "No saved level found");
+    if (IsButtonClicked(actionButtons[2]))
+    {
+        ResetCustomLevelScaffold();
+        EditorStatus("Cleared");
+    }
+    if (IsButtonClicked(actionButtons[3]) || IsKeyPressed(KEY_P))
+    {
+        Snd(sndGrapple);
+        StartLevel(CUSTOM_LEVEL_INDEX, player);
+        *won = false;
+        *state = STATE_PLAYING;
+    }
+    if (IsButtonClicked(actionButtons[4]) || IsKeyPressed(KEY_ESCAPE))
+    {
+        *state = STATE_LEVEL_SELECT;
+    }
+
+    Vector2 worldMouse = GetScreenToWorld2D(mouse, *camera);
+    Vector2 snapped = { EditorSnap(worldMouse.x), EditorSnap(worldMouse.y) };
+
+    if (!overUI)
+    {
+        if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT))
+        {
+            if (editorTool == TOOL_ANCHOR)
+            {
+                AddAnchor(snapped.x, snapped.y);
+                RecalcCustomWorldBounds();
+                SpawnBurst(snapped, 8, 120.0f, 0.3f, 3.0f, (Color) { 250, 210, 60, 255 });
+            }
+            else if (editorTool == TOOL_COIN)
+            {
+                AddCoin(snapped.x, snapped.y);
+                RecalcCustomWorldBounds();
+                SpawnBurst(snapped, 8, 120.0f, 0.3f, 3.0f, (Color) { 255, 215, 60, 255 });
+            }
+            else if (editorTool == TOOL_GOAL)
+            {
+                goalRect = (Rectangle){ snapped.x - 20, snapped.y - 70, 40, 70 };
+                RecalcCustomWorldBounds();
+            }
+            else if (editorTool == TOOL_SPAWN)
+            {
+                spawnPoint = (Vector2){ snapped.x - PLAYER_W * 0.5f, snapped.y - PLAYER_H };
+                RecalcCustomWorldBounds();
+            }
+            else
+            {
+                editorDragging = true;
+                editorDragStart = snapped;
+            }
+        }
+        if (IsMouseButtonReleased(MOUSE_BUTTON_LEFT) && editorDragging)
+        {
+            editorDragging = false;
+            if (editorTool == TOOL_ENEMY) EditorPlaceEnemy(editorDragStart, snapped);
+            else EditorPlaceRect(editorTool, editorDragStart, snapped);
+            Snd(sndLand);
+            SpawnBurst(snapped, 10, 140.0f, 0.35f, 3.0f, (Color) { 200, 200, 220, 255 });
+        }
+        if (IsMouseButtonPressed(MOUSE_BUTTON_RIGHT))
+        {
+            if (TryEraseNear(worldMouse))
+            {
+                RecalcCustomWorldBounds();
+                Snd(sndWallBounce);
+                SpawnBurst(worldMouse, 10, 150.0f, 0.3f, 3.0f, (Color) { 220, 80, 80, 255 });
+            }
+        }
+    }
+    else if (IsMouseButtonReleased(MOUSE_BUTTON_LEFT))
+    {
+        editorDragging = false;
+    }
+
+    if (editorStatusTimer > 0.0f) editorStatusTimer -= dt;
+    UpdateParticles(dt);
+
+    BeginDrawing();
+    ClearBackground((Color) { 190, 220, 245, 255 });
+    DrawBackground(*camera, (float)GetTime());
+
+    BeginMode2D(*camera);
+    DrawEditorGrid(*camera);
+    for (int i = 0; i < solidCount; i++) DrawSolid(&solids[i]);
+    for (int i = 0; i < spikeCount; i++) DrawSpike(spikes[i]);
+    DrawEnemies((float)GetTime());
+    for (int i = 0; i < coinCount; i++) DrawCoin(&coins[i], (float)GetTime());
+    for (int i = 0; i < anchorCount; i++) DrawAnchor(anchors[i], false);
+    DrawEditorMarkers();
+
+    if (editorDragging)
+    {
+        Rectangle preview = {
+            fminf(editorDragStart.x, snapped.x), fminf(editorDragStart.y, snapped.y),
+            fabsf(snapped.x - editorDragStart.x), fabsf(snapped.y - editorDragStart.y)
+        };
+        DrawRectangleRec(preview, Fade(SKYBLUE, 0.35f));
+        DrawRectangleLinesEx(preview, 2, SKYBLUE);
+    }
+    if (!overUI) DrawCircleV(snapped, 4, Fade(WHITE, 0.8f));
+
+    DrawParticles();
+    EndMode2D();
+
+    DrawRectangle(0, 0, SCREEN_W, 118, Fade(BLACK, 0.45f));
+    for (int i = 0; i < n; i++)
+    {
+        DrawButton(toolButtons[i], editorToolLabels[i], 16);
+        if ((int)editorTool == i)
+            DrawRectangleLinesEx((Rectangle) {
+            toolButtons[i].x - 3, toolButtons[i].y - 3,
+                toolButtons[i].width + 6, toolButtons[i].height + 6
+        },
+                3, (Color) { 255, 230, 120, 255 });
+    }
+    for (int i = 0; i < 5; i++) DrawButton(actionButtons[i], actionLabels[i], 16);
+
+    const char* hint = "Left-click/drag: place    Right-click: erase    WASD/Arrows: pan    Wheel: zoom    1-9: tools";
+    int hw = MeasureText(hint, 16);
+    DrawText(hint, SCREEN_W / 2 - hw / 2, 120, 16, (Color) { 230, 230, 235, 255 });
+
+    if (editorStatusTimer > 0.0f)
+    {
+        unsigned char a = (unsigned char)(255 * Clamp(editorStatusTimer / 2.2f, 0.0f, 1.0f));
+        int sw = MeasureText(editorStatusMsg, 20);
+        DrawText(editorStatusMsg, SCREEN_W / 2 - sw / 2, 144, 20, (Color) { 255, 255, 255, a });
+    }
+
+    char counts[160];
+    snprintf(counts, sizeof(counts), "Solids %d/%d   Spikes %d/%d   Anchors %d/%d   Coins %d/%d   Enemies %d/%d",
+        solidCount, MAX_SOLIDS, spikeCount, MAX_SPIKES, anchorCount, MAX_ANCHORS,
+        coinCount, MAX_COINS, enemyCount, MAX_ENEMIES);
+    DrawText(counts, 12, SCREEN_H - 26, 16, (Color) { 230, 230, 235, 255 });
+
+    EndDrawing();
+}
+
 int main(void)
 {
     InitWindow(SCREEN_W, SCREEN_H, "AI Platformer - Momentum & Grapple");
-    SetExitKey(KEY_NULL); // ESC is ours to use for menu navigation, not window close
+    SetExitKey(KEY_NULL);
     SetTargetFPS(60);
     InitGameAudio();
 
@@ -1907,20 +3147,21 @@ int main(void)
     GameState state = STATE_MENU;
 
     Rectangle playButton = { SCREEN_W / 2.0f - 110, SCREEN_H / 2.0f - 30, 220, 56 };
-    Rectangle quitButton  = { SCREEN_W / 2.0f - 110, SCREEN_H / 2.0f + 40, 220, 56 };
+    Rectangle quitButton = { SCREEN_W / 2.0f - 110, SCREEN_H / 2.0f + 40, 220, 56 };
     float menuTime = 0.0f;
     bool playHoveredPrev = false;
     bool quitHoveredPrev = false;
 
-    // Level select layout: LEVEL_COUNT cards in a row, plus a back button
-    const float cardW = 240.0f, cardH = 210.0f, cardGap = 30.0f;
+    const float cardW = 200.0f, cardH = 200.0f, cardGap = 20.0f;
     const float cardsX = (SCREEN_W - (LEVEL_COUNT * cardW + (LEVEL_COUNT - 1) * cardGap)) / 2.0f;
     Rectangle levelCards[LEVEL_COUNT];
     for (int i = 0; i < LEVEL_COUNT; i++)
         levelCards[i] = (Rectangle){ cardsX + i * (cardW + cardGap), SCREEN_H / 2.0f - 90, cardW, cardH };
-    Rectangle backButton = { SCREEN_W / 2.0f - 110, SCREEN_H / 2.0f + 160, 220, 56 };
+    Rectangle backButton = { SCREEN_W / 2.0f - 340, SCREEN_H / 2.0f + 160, 220, 56 };
+    Rectangle createButton = { SCREEN_W / 2.0f - 100, SCREEN_H / 2.0f + 160, 220, 56 };
     int hoveredCardPrev = -1;
     bool backHoveredPrev = false;
+    bool createHoveredPrev = false;
 
     while (!WindowShouldClose() && !quitRequested)
     {
@@ -1930,9 +3171,8 @@ int main(void)
         {
             menuTime += dt;
 
-            // Slow auto-pan keeps the parallax hills/clouds drifting instead
-            // of sitting frozen behind the menu.
             camera.target.x = menuTime * 35.0f;
+            currentBgTheme = BG_DEFAULT;
 
             bool playHovered = CheckCollisionPointRec(GetMousePosition(), playButton);
             bool quitHovered = CheckCollisionPointRec(GetMousePosition(), quitButton);
@@ -1947,7 +3187,7 @@ int main(void)
             {
                 Snd(sndGrapple);
                 Vector2 btnCenter = { playButton.x + playButton.width * 0.5f, playButton.y + playButton.height * 0.5f };
-                SpawnBurst(btnCenter, 16, 200.0f, 0.5f, 3.5f, (Color){ 250, 220, 120, 255 });
+                SpawnBurst(btnCenter, 16, 200.0f, 0.5f, 3.5f, (Color) { 250, 220, 120, 255 });
                 state = STATE_LEVEL_SELECT;
             }
             if (quitClicked) quitRequested = true;
@@ -1955,31 +3195,31 @@ int main(void)
             UpdateParticles(dt);
 
             BeginDrawing();
-            ClearBackground((Color){ 190, 220, 245, 255 });
-            DrawParallaxBackground(camera);
+            ClearBackground((Color) { 190, 220, 245, 255 });
+            DrawBackground(camera, menuTime);
             DrawTwinkleStars(menuTime);
 
             Rectangle panel = { SCREEN_W / 2.0f - 340, SCREEN_H / 2.0f - 220, 680, 420 };
             DrawRectangleRounded(panel, 0.08f, 12, Fade(BLACK, 0.22f));
 
-            const char *title = "AI PLATFORMER";
+            const char* title = "AI PLATFORMER";
             int fontSize = 64;
             int tw = MeasureText(title, fontSize);
             float titleY = SCREEN_H / 2.0f - 160.0f + sinf(menuTime * 1.6f) * 5.0f;
             DrawText(title, SCREEN_W / 2 - tw / 2 + 3, (int)titleY + 3, fontSize, Fade(BLACK, 0.35f));
-            DrawText(title, SCREEN_W / 2 - tw / 2, (int)titleY, fontSize, (Color){ 255, 236, 160, 255 });
+            DrawText(title, SCREEN_W / 2 - tw / 2, (int)titleY, fontSize, (Color) { 255, 236, 160, 255 });
 
             DrawButton(playButton, "PLAY", 26);
             DrawButton(quitButton, "QUIT", 26);
 
             DrawParticles();
 
-            const char *controls1 = "A/D or Arrows: run   SPACE: jump (double-jump in air!)   F / Click: grapple";
-            const char *controls2 = "While grappling -> W/S or Up/Down: reel in/out    R: restart    ESC: level select";
+            const char* controls1 = "A/D or Arrows: run   SPACE: jump (double-jump in air!)   F / Click: grapple";
+            const char* controls2 = "While grappling -> W/S or Up/Down: reel in/out    R: restart    ESC: level select";
             int cw1 = MeasureText(controls1, 16);
             int cw2 = MeasureText(controls2, 16);
-            DrawText(controls1, SCREEN_W / 2 - cw1 / 2, SCREEN_H / 2 + 120, 16, (Color){ 230, 230, 235, 255 });
-            DrawText(controls2, SCREEN_W / 2 - cw2 / 2, SCREEN_H / 2 + 144, 16, (Color){ 230, 230, 235, 255 });
+            DrawText(controls1, SCREEN_W / 2 - cw1 / 2, SCREEN_H / 2 + 120, 16, (Color) { 230, 230, 235, 255 });
+            DrawText(controls2, SCREEN_W / 2 - cw2 / 2, SCREEN_H / 2 + 144, 16, (Color) { 230, 230, 235, 255 });
 
             EndDrawing();
             continue;
@@ -1989,14 +3229,18 @@ int main(void)
         {
             menuTime += dt;
             camera.target.x = menuTime * 35.0f;
+            currentBgTheme = BG_DEFAULT;
 
             int hoveredCard = -1;
             for (int i = 0; i < LEVEL_COUNT; i++)
                 if (CheckCollisionPointRec(GetMousePosition(), levelCards[i])) hoveredCard = i;
             bool backHovered = CheckCollisionPointRec(GetMousePosition(), backButton);
-            if ((hoveredCard >= 0 && hoveredCard != hoveredCardPrev) || (backHovered && !backHoveredPrev)) Snd(sndCoin);
+            bool createHovered = CheckCollisionPointRec(GetMousePosition(), createButton);
+            if ((hoveredCard >= 0 && hoveredCard != hoveredCardPrev) || (backHovered && !backHoveredPrev)
+                || (createHovered && !createHoveredPrev)) Snd(sndCoin);
             hoveredCardPrev = hoveredCard;
             backHoveredPrev = backHovered;
+            createHoveredPrev = createHovered;
 
             int chosen = -1;
             if (hoveredCard >= 0 && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) chosen = hoveredCard;
@@ -2010,6 +3254,18 @@ int main(void)
                 won = false;
                 state = STATE_PLAYING;
             }
+            else if (IsButtonClicked(createButton))
+            {
+                Snd(sndGrapple);
+                if (!LoadCustomLevel()) ResetCustomLevelScaffold();
+                editorCamTarget = Vector2Add(spawnPoint, (Vector2) { 400.0f, -150.0f });
+                editorZoom = 1.0f;
+                editorDragging = false;
+                editorStatusTimer = 0.0f;
+                currentBgTheme = BG_EDITOR;
+                currentPalette = paletteEditor;
+                state = STATE_EDITOR;
+            }
             else if (IsButtonClicked(backButton) || IsKeyPressed(KEY_ESCAPE))
             {
                 state = STATE_MENU;
@@ -2018,39 +3274,43 @@ int main(void)
             UpdateParticles(dt);
 
             BeginDrawing();
-            ClearBackground((Color){ 190, 220, 245, 255 });
-            DrawParallaxBackground(camera);
+            ClearBackground((Color) { 190, 220, 245, 255 });
+            DrawBackground(camera, menuTime);
             DrawTwinkleStars(menuTime);
 
             Rectangle panel = { SCREEN_W / 2.0f - 570, SCREEN_H / 2.0f - 250, 1140, 520 };
             DrawRectangleRounded(panel, 0.06f, 12, Fade(BLACK, 0.22f));
 
-            const char *title = "SELECT LEVEL";
+            const char* title = "SELECT LEVEL";
             int tw = MeasureText(title, 56);
             float titleY = SCREEN_H / 2.0f - 200.0f + sinf(menuTime * 1.6f) * 4.0f;
             DrawText(title, SCREEN_W / 2 - tw / 2 + 3, (int)titleY + 3, 56, Fade(BLACK, 0.35f));
-            DrawText(title, SCREEN_W / 2 - tw / 2, (int)titleY, 56, (Color){ 255, 236, 160, 255 });
+            DrawText(title, SCREEN_W / 2 - tw / 2, (int)titleY, 56, (Color) { 255, 236, 160, 255 });
 
             for (int i = 0; i < LEVEL_COUNT; i++)
                 DrawLevelCard(levelCards[i], i + 1, levelNames[i], bestTimes[i], levelPreviews[i].texture);
             DrawButton(backButton, "BACK", 26);
+            DrawButton(createButton, "CREATE LEVEL", 20);
 
-            char hint[64];
-            snprintf(hint, sizeof(hint), "Click a level or press 1-%d    ESC: back", LEVEL_COUNT);
+            char hint[96];
+            snprintf(hint, sizeof(hint), "Click a level or press 1-%d    CREATE LEVEL: build your own    ESC: back", LEVEL_COUNT);
             int hw = MeasureText(hint, 16);
-            DrawText(hint, SCREEN_W / 2 - hw / 2, SCREEN_H / 2 + 235, 16, (Color){ 230, 230, 235, 255 });
+            DrawText(hint, SCREEN_W / 2 - hw / 2, SCREEN_H / 2 + 235, 16, (Color) { 230, 230, 235, 255 });
 
             DrawParticles();
             EndDrawing();
             continue;
         }
 
+        if (state == STATE_EDITOR)
+        {
+            RunEditor(&camera, &state, &player, &won, dt);
+            continue;
+        }
+
         if (IsKeyPressed(KEY_ESCAPE))
         {
-            // Leave the level back to the level select screen. Falls through
-            // so this frame still finishes its EndDrawing (which polls input);
-            // skipping it would leave ESC "pressed" for the next screen.
-            state = STATE_LEVEL_SELECT;
+            state = (currentLevel == CUSTOM_LEVEL_INDEX) ? STATE_EDITOR : STATE_LEVEL_SELECT;
             hoveredCardPrev = -1;
         }
 
@@ -2064,7 +3324,6 @@ int main(void)
         {
             levelTime += dt;
 
-            // ---- Horizontal input / momentum ----
             float moveDir = 0.0f;
             if (IsKeyDown(KEY_RIGHT) || IsKeyDown(KEY_D)) moveDir += 1.0f;
             if (IsKeyDown(KEY_LEFT) || IsKeyDown(KEY_A)) moveDir -= 1.0f;
@@ -2078,28 +3337,20 @@ int main(void)
                 float vx = player.velocity.x;
                 if (player.grappling)
                 {
-                    // Pumping the swing: no run-speed cap while hooked.
                     player.velocity.x += moveDir * accel * dt;
                 }
                 else if (fabsf(vx) <= MAX_RUN_SPEED)
                 {
-                    // Normal running: accelerate up to the cap, never past it.
                     player.velocity.x = Clamp(vx + moveDir * accel * dt, -MAX_RUN_SPEED, MAX_RUN_SPEED);
                 }
                 else if (vx * moveDir < 0.0f)
                 {
-                    // Above the cap but pushing against momentum: braking is allowed.
                     player.velocity.x += moveDir * accel * dt;
                 }
                 else if (player.onGround)
                 {
-                    // Above the cap on the ground while pushing the same way:
-                    // ease back down to the cap instead of snapping to it.
                     player.velocity.x = copysignf(fmaxf(fabsf(vx) - friction * dt, MAX_RUN_SPEED), vx);
                 }
-                // else: airborne above the cap, pushing the same way -- keep the
-                // momentum (no extra acceleration, no clamp).
-                // occasional running dust while grounded and moving fast
                 if (player.onGround && GetRandomValue(0, 100) < 12)
                 {
                     Vector2 feet = { player.position.x + PLAYER_W * 0.5f, player.position.y + PLAYER_H };
@@ -2108,7 +3359,6 @@ int main(void)
             }
             else if (!(player.grappling && !player.onGround))
             {
-                // No air friction while hooked: swing momentum should carry.
                 if (player.velocity.x > 0.0f)
                 {
                     player.velocity.x -= friction * dt;
@@ -2121,14 +3371,12 @@ int main(void)
                 }
             }
 
-            // ---- Coyote time & jump buffer bookkeeping ----
             if (player.onGround) player.coyoteTimer = COYOTE_TIME;
             else player.coyoteTimer -= dt;
 
             if (IsKeyPressed(KEY_SPACE)) player.jumpBufferTimer = JUMP_BUFFER_TIME;
             else player.jumpBufferTimer -= dt;
 
-            // ---- Jump (grounded, coyote-time, or buffered) ----
             bool canGroundJump = (player.onGround || player.coyoteTimer > 0.0f);
             if (player.jumpBufferTimer > 0.0f && canGroundJump)
             {
@@ -2142,7 +3390,6 @@ int main(void)
                 Vector2 feet = { player.position.x + PLAYER_W * 0.5f, player.position.y + PLAYER_H };
                 SpawnBurst(feet, 6, 120.0f, 0.3f, 2.5f, (Color) { 210, 200, 170, 220 });
             }
-            // ---- Double jump: available once per airtime, refreshed by grounding or grappling ----
             else if (IsKeyPressed(KEY_SPACE) && !canGroundJump && !player.grappling && !player.usedDoubleJump)
             {
                 player.velocity.y = DOUBLE_JUMP_VELOCITY;
@@ -2159,74 +3406,72 @@ int main(void)
                 player.velocity.y *= JUMP_CUT_MULT;
             }
 
-            // ---- Grapple fire / release ----
             if (IsKeyPressed(KEY_F) || IsMouseButtonPressed(MOUSE_BUTTON_LEFT))
             {
                 if (player.grappling) player.grappling = false;
                 else TryFireGrapple(&player);
             }
 
-            // ---- Gravity ----
             player.velocity.y += GRAVITY * dt;
             if (!player.grappling) player.velocity.y = fminf(player.velocity.y, MAX_FALL_SPEED);
 
-            // ---- Physics step ----
+            UpdatePlatforms(&player, dt);
+            ResolveSolidOverlap(&player);
+
             MoveAndCollide(&player, dt);
             UpdateGrapple(&player, dt);
 
-            // ---- Squash & stretch relaxes back to normal each frame ----
             player.scale.x = Lerp(player.scale.x, 1.0f, 1.0f - expf(-14.0f * dt));
             player.scale.y = Lerp(player.scale.y, 1.0f, 1.0f - expf(-14.0f * dt));
 
-            // ---- Coins ----
             CheckCoins(&player);
 
-            // ---- Enemies ----
             UpdateEnemies(dt);
 
-            // ---- Hazards ----
             if (TouchesAnySpike(&player))
             {
                 Snd(sndDeath);
                 Shake(8.0f, 0.2f);
                 SpawnBurst(PlayerCenter(&player), 16, 220.0f, 0.5f, 4.0f, (Color) { 220, 40, 40, 255 });
-                RespawnPlayer(&player);
+                StartLevel(currentLevel, &player);
             }
             if (TouchesAnyEnemy(&player))
             {
                 Snd(sndDeath);
                 Shake(8.0f, 0.2f);
                 SpawnBurst(PlayerCenter(&player), 16, 220.0f, 0.5f, 4.0f, (Color) { 150, 50, 170, 255 });
-                RespawnPlayer(&player);
+                StartLevel(currentLevel, &player);
             }
             if (player.position.y > WORLD_DEATH_Y)
             {
                 Snd(sndDeath);
-                RespawnPlayer(&player);
+                StartLevel(currentLevel, &player);
             }
 
-            // ---- Goal ----
+            RecordGhost(&player);
+
             if (CheckCollisionRecs(PlayerRect(player.position), goalRect))
             {
                 won = true;
                 Snd(sndWin);
                 Shake(10.0f, 0.3f);
                 SpawnBurst(PlayerCenter(&player), 40, 260.0f, 0.8f, 4.5f, (Color) { 255, 220, 90, 255 });
-                if (bestTimes[currentLevel] < 0.0f || levelTime < bestTimes[currentLevel])
+                if (currentLevel != CUSTOM_LEVEL_INDEX &&
+                    (bestTimes[currentLevel] < 0.0f || levelTime < bestTimes[currentLevel]))
+                {
                     bestTimes[currentLevel] = levelTime;
+                    SaveGhost(currentLevel);
+                }
             }
         }
 
         UpdateParticles(dt);
         if (shakeTime > 0.0f) shakeTime -= dt; else shakeMagnitude = 0.0f;
 
-        // ---- Camera ----
-        // ---- Speed intensity (0..1 based on horizontal velocity) ----
         float rawSpeed = Vector2Length(player.velocity);
         float targetIntensity = (rawSpeed - SPEED_BLUR_MIN) / (SPEED_BLUR_MAX - SPEED_BLUR_MIN);
         if (targetIntensity < 0.0f) targetIntensity = 0.0f;
         if (targetIntensity > 1.0f) targetIntensity = 1.0f;
-        // Only consider horizontal + downward speed for the "rush" feel
         float horizSpeed = fabsf(player.velocity.x);
         float horizIntensity = (horizSpeed - 200.0f) / 500.0f;
         if (horizIntensity < 0.0f) horizIntensity = 0.0f;
@@ -2234,25 +3479,19 @@ int main(void)
 
         float finalIntensity = targetIntensity > horizIntensity ? targetIntensity : horizIntensity;
 
-        // Smooth intensity for visual filters
         speedIntensity = Lerp(speedIntensity, finalIntensity, 1.0f - expf(-8.0f * dt));
 
-        // Smooth display speed for MPH (MPH = world units/sec * scale)
         displaySpeed = Lerp(displaySpeed, rawSpeed, 1.0f - expf(-6.0f * dt));
 
-        // ---- Camera with lead/lag ----
         Vector2 playerCenter = PlayerCenter(&player);
 
-        // Camera leads in movement direction, creating drag/anticipation feel
         Vector2 leadOffset = {
             player.velocity.x * CAMERA_LEAD_FACTOR * 0.25f,
-            player.velocity.y * CAMERA_LEAD_FACTOR * 0.12f  // less vertical lead
+            player.velocity.y * CAMERA_LEAD_FACTOR * 0.12f
         };
 
-        // When starting/stopping, camera lags behind
         Vector2 desiredTarget = Vector2Add(playerCenter, leadOffset);
 
-        // Smooth camera position
         Vector2 diff = Vector2Subtract(desiredTarget, cameraSmooth);
         cameraSmooth = Vector2Add(cameraSmooth, Vector2Scale(diff, 1.0f - expf(-CAMERA_LAG_SPEED * dt)));
 
@@ -2263,7 +3502,6 @@ int main(void)
         camera.target.x = Clamp(camera.target.x, halfW, worldWidth - halfW);
         camera.target.y = Clamp(camera.target.y, worldTopY + halfH, worldBottomY - halfH);
 
-        // Camera zoom pulls back slightly at high speed for wider view
         float targetZoom = 1.0f - speedIntensity * 0.08f;
         camera.zoom = Lerp(camera.zoom, targetZoom, 1.0f - expf(-6.0f * dt));
 
@@ -2274,7 +3512,6 @@ int main(void)
             camOffset.y += (float)GetRandomValue(-100, 100) / 100.0f * shakeMagnitude;
             shakeMagnitude *= 0.9f;
         }
-        // High-speed micro-jitter for intensity
         if (speedIntensity > 0.5f)
         {
             float jitter = (speedIntensity - 0.5f) * 4.0f;
@@ -2283,7 +3520,6 @@ int main(void)
         }
         camera.offset = camOffset;
 
-        // ---- Spawn speed streaks based on player velocity ----
         if (speedIntensity > 0.1f)
         {
             int streakCount = (int)(speedIntensity * 4.0f);
@@ -2293,19 +3529,15 @@ int main(void)
         }
         UpdateSpeedStreaks(dt);
 
-        // ---- Update motion trail ----
         UpdateTrailGhosts(&player, dt);
 
-        // ---- Draw ----
         BeginDrawing();
         ClearBackground((Color) { 190, 220, 245, 255 });
 
-        // Apply camera zoom to background too for consistency
-        DrawParallaxBackground(camera);
+        DrawBackground(camera, levelTime);
 
         BeginMode2D(camera);
 
-        // Draw trail ghosts before player
         DrawTrailGhosts();
 
         for (int i = 0; i < solidCount; i++) DrawSolid(&solids[i]);
@@ -2338,26 +3570,22 @@ int main(void)
         }
         else
         {
-            // Aim indicator: dotted line to the anchor a click would hook.
             int aimed = FindBestAnchor(&player);
             if (aimed >= 0)
                 DrawDottedLine(PlayerCenter(&player), anchors[aimed], (float)GetTime(), (Color) { 70, 220, 255, 220 });
         }
 
         DrawParticles();
+        if (currentLevel != CUSTOM_LEVEL_INDEX) DrawGhost(currentLevel, levelTime);
         DrawPlayer(&player);
 
         EndMode2D();
 
-        // ---- Speed visual filters (drawn in screen space) ----
         DrawRadialSpeedLines(player.velocity, speedIntensity);
         DrawSpeedStreaks(camera);
         DrawChromaticAberration(speedIntensity);
         DrawSpeedVignette(speedIntensity);
 
-        // ---- HUD ----
-
-        // ---- HUD ----
         DrawRectangle(0, 0, SCREEN_W, 84, Fade(BLACK, 0.35f));
         DrawText("A/D or Arrows: run   SPACE: jump (double-jump in air!)   F / Click: grapple",
             16, 8, 18, RAYWHITE);
@@ -2371,11 +3599,11 @@ int main(void)
         int hw = MeasureText(hud, 22);
         DrawText(hud, SCREEN_W - hw - 16, 12, 22, (Color) { 255, 230, 120, 255 });
 
-        // ---- MPH counter (bottom center) ----
+        DrawMinimap(currentLevel, PlayerCenter(&player), levelTime, (float)GetTime());
+
         {
             float mph = displaySpeed * MPH_SCALE;
 
-            // Color shifts from white -> yellow -> orange -> red as speed increases
             Color mphColor;
             if (speedIntensity < 0.33f)
             {
@@ -2412,17 +3640,14 @@ int main(void)
             snprintf(mphText, sizeof(mphText), "%3.0f MPH", mph);
             int mphW = MeasureText(mphText, 36);
 
-            // Background panel for readability
             DrawRectangle(SCREEN_W / 2 - mphW / 2 - 16, SCREEN_H - 60, mphW + 32, 48,
                 Fade(BLACK, 0.45f + speedIntensity * 0.3f));
 
-            // Slight scale pulse at high speed
             float pulse = 1.0f + speedIntensity * 0.08f * sinf(levelTime * 20.0f);
             int fontSize = (int)(36 * pulse);
 
             DrawText(mphText, SCREEN_W / 2 - mphW / 2, SCREEN_H - 54, fontSize, mphColor);
 
-            // Speed bar underneath
             float barW = 300.0f;
             float barH = 6.0f;
             float barX = SCREEN_W / 2 - barW / 2;
@@ -2431,17 +3656,15 @@ int main(void)
             DrawRectangle((int)barX, (int)barY, (int)barW, (int)barH, Fade(BLACK, 0.5f));
             DrawRectangle((int)barX, (int)barY, (int)(barW * speedIntensity), (int)barH, mphColor);
 
-            // Tick marks at thirds
             for (int i = 1; i < 3; i++)
             {
                 int tx = (int)(barX + barW * i / 3.0f);
                 DrawRectangle(tx, (int)barY - 2, 1, (int)barH + 4, Fade(WHITE, 0.4f));
             }
 
-            // "SPEED" label on the side
             DrawText("SPEED", (int)(barX - 56), (int)(barY - 4), 14, Fade(WHITE, 0.6f));
         }
-        if (bestTimes[currentLevel] > 0.0f)
+        if (currentLevel != CUSTOM_LEVEL_INDEX && bestTimes[currentLevel] > 0.0f)
         {
             char best[64];
             snprintf(best, sizeof(best), "Best: %05.2fs", bestTimes[currentLevel]);
@@ -2451,7 +3674,9 @@ int main(void)
 
         if (won)
         {
-            const char* msg = "LEVEL COMPLETE!  R: replay   ESC: level select";
+            const char* msg = (currentLevel == CUSTOM_LEVEL_INDEX)
+                ? "LEVEL COMPLETE!  R: replay   ESC: back to editor"
+                : "LEVEL COMPLETE!  R: replay   ESC: level select";
             int w = MeasureText(msg, 40);
             DrawRectangle(SCREEN_W / 2 - w / 2 - 20, SCREEN_H / 2 - 50, w + 40, 100, Fade(BLACK, 0.6f));
             DrawText(msg, SCREEN_W / 2 - w / 2, SCREEN_H / 2 - 30, 40, (Color) { 250, 220, 80, 255 });
@@ -2467,6 +3692,8 @@ int main(void)
     }
 
     for (int i = 0; i < LEVEL_COUNT; i++) UnloadRenderTexture(levelPreviews[i]);
+    for (int i = 0; i < LEVEL_COUNT; i++) free(ghostTracks[i].samples);
+    free(recordingTrack.samples);
     ShutdownGameAudio();
     CloseWindow();
     return 0;
