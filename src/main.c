@@ -26,6 +26,10 @@
 #define COYOTE_TIME       0.10f    // grace period to jump after walking off a ledge
 #define JUMP_BUFFER_TIME  0.12f    // grace period for a jump press just before landing
 
+#define DASH_SPEED        950.0f  // fixed horizontal speed during a dash burst
+#define DASH_DURATION     0.16f   // how long the burst lasts
+#define DASH_GRAVITY_MULT 0.15f   // gravity is mostly suspended during the burst
+
 #define PLAYER_W 30.0f
 #define PLAYER_H 44.0f
 
@@ -89,6 +93,10 @@ typedef struct {
     float coyoteTimer;
     float jumpBufferTimer;
     bool  usedDoubleJump;
+    bool  usedDash;
+    float dashTimer;     // > 0 while a dash burst is active
+    float dashDir;       // locked burst direction, set when the dash fires
+    float dashSpeed;     // locked burst magnitude: max(DASH_SPEED, speed you already had)
     Vector2 scale;       // squash & stretch, lerps toward (1,1)
 
     // Direction anchor->player from the last taut-rope frame, so velocity can
@@ -177,7 +185,7 @@ static float shakeMagnitude = 0.0f;
 static float levelTime = 0.0f;
 static float bestTimes[LEVEL_COUNT] = { -1.0f, -1.0f, -1.0f, -1.0f };
 static int currentLevel = 0;
-static const char *levelNames[LEVEL_COUNT] = { "Momentum Run", "Spike Alley", "Sky Islands", "Twin Lanes" };
+static const char* levelNames[LEVEL_COUNT] = { "Momentum Run", "Spike Alley", "Sky Islands", "Twin Lanes" };
 
 //------------------------------------------------------------------------------------
 // Level editor state
@@ -194,13 +202,13 @@ static Vector2 editorDragStart = { 0 };
 static char    editorStatusMsg[80] = "";
 static float   editorStatusTimer = 0.0f;
 
-static const char *editorToolLabels[NUM_EDITOR_TOOLS] = {
+static const char* editorToolLabels[NUM_EDITOR_TOOLS] = {
     "GROUND", "FLOAT", "WALL", "SPIKE", "ANCHOR", "COIN", "ENEMY", "GOAL", "SPAWN"
 };
 
 
 // Sounds (generated procedurally, no external assets needed)
-static Sound sndJump, sndDoubleJump, sndLand, sndGrapple, sndWallBounce, sndCoin, sndWin, sndDeath;
+static Sound sndJump, sndDoubleJump, sndLand, sndGrapple, sndWallBounce, sndCoin, sndWin, sndDeath, sndDash;
 static bool audioReady = false;
 
 static void AddSolid(float x, float y, float w, float h, SolidType type)
@@ -245,7 +253,7 @@ static void AddEnemy(float x, float groundY, float minX, float maxX, float speed
     enemyCount++;
 }
 
-static void EditorStatus(const char *msg)
+static void EditorStatus(const char* msg)
 {
     snprintf(editorStatusMsg, sizeof(editorStatusMsg), "%s", msg);
     editorStatusTimer = 2.2f;
@@ -260,7 +268,7 @@ static void RecalcCustomWorldBounds(void)
     float minX = spawnPoint.x, maxX = spawnPoint.x + 200.0f;
     float minY = spawnPoint.y - 300.0f, maxY = spawnPoint.y + 300.0f;
 
-    #define EXPAND(px, py) do { \
+#define EXPAND(px, py) do { \
         if ((px) < minX) minX = (px); if ((px) > maxX) maxX = (px); \
         if ((py) < minY) minY = (py); if ((py) > maxY) maxY = (py); \
     } while (0)
@@ -280,7 +288,7 @@ static void RecalcCustomWorldBounds(void)
     for (int i = 0; i < anchorCount; i++) EXPAND(anchors[i].x, anchors[i].y);
     for (int i = 0; i < coinCount; i++) EXPAND(coins[i].pos.x, coins[i].pos.y);
     for (int i = 0; i < enemyCount; i++) EXPAND(enemies[i].pos.x, enemies[i].pos.y);
-    #undef EXPAND
+#undef EXPAND
 
     worldWidth = maxX + 400.0f;
     worldTopY = minY - 300.0f;
@@ -315,7 +323,7 @@ static bool TryEraseNear(Vector2 world)
 
 static void SaveCustomLevel(void)
 {
-    FILE *f = fopen(CUSTOM_LEVEL_FILE, "w");
+    FILE* f = fopen(CUSTOM_LEVEL_FILE, "w");
     if (!f) { EditorStatus("Save failed (couldn't open file)"); return; }
 
     fprintf(f, "CUSTOMLEVEL 1\n");
@@ -324,7 +332,7 @@ static void SaveCustomLevel(void)
     fprintf(f, "SOLIDS %d\n", solidCount);
     for (int i = 0; i < solidCount; i++)
         fprintf(f, "%f %f %f %f %d\n", solids[i].rect.x, solids[i].rect.y,
-                solids[i].rect.width, solids[i].rect.height, (int)solids[i].type);
+            solids[i].rect.width, solids[i].rect.height, (int)solids[i].type);
     fprintf(f, "SPIKES %d\n", spikeCount);
     for (int i = 0; i < spikeCount; i++)
         fprintf(f, "%f %f %f %f\n", spikes[i].x, spikes[i].y, spikes[i].width, spikes[i].height);
@@ -337,7 +345,7 @@ static void SaveCustomLevel(void)
     fprintf(f, "ENEMIES %d\n", enemyCount);
     for (int i = 0; i < enemyCount; i++)
         fprintf(f, "%f %f %f %f %f\n", enemies[i].pos.x, enemies[i].pos.y,
-                enemies[i].minX, enemies[i].maxX, enemies[i].speed);
+            enemies[i].minX, enemies[i].maxX, enemies[i].speed);
 
     fclose(f);
     EditorStatus("Saved!");
@@ -347,7 +355,7 @@ static void SaveCustomLevel(void)
 // arrays are left untouched (caller decides what to fall back to).
 static bool LoadCustomLevel(void)
 {
-    FILE *f = fopen(CUSTOM_LEVEL_FILE, "r");
+    FILE* f = fopen(CUSTOM_LEVEL_FILE, "r");
     if (!f) return false;
 
     char tag[32];
@@ -566,6 +574,7 @@ static void InitGameAudio(void)
     sndCoin = MakeTone(900.0f, 0.14f, 700.0f, false);
     sndWin = MakeTone(600.0f, 0.55f, 500.0f, false);
     sndDeath = MakeTone(300.0f, 0.30f, -220.0f, true);
+    sndDash = MakeTone(220.0f, 0.10f, 900.0f, false);
 }
 
 static void ShutdownGameAudio(void)
@@ -579,6 +588,7 @@ static void ShutdownGameAudio(void)
     UnloadSound(sndCoin);
     UnloadSound(sndWin);
     UnloadSound(sndDeath);
+    UnloadSound(sndDash);
     CloseAudioDevice();
 }
 
@@ -1266,10 +1276,10 @@ static void BuildLevel(int index)
     solidCount = spikeCount = anchorCount = coinCount = enemyCount = 0;
     switch (index)
     {
-        case 1:  BuildLevel2(); break;
-        case 2:  BuildLevel3(); break;
-        case 3:  BuildLevel4(); break;
-        default: BuildLevel1(); break;
+    case 1:  BuildLevel2(); break;
+    case 2:  BuildLevel3(); break;
+    case 3:  BuildLevel4(); break;
+    default: BuildLevel1(); break;
     }
 }
 
@@ -1346,6 +1356,7 @@ static void MoveAndCollide(Player* p, float dt)
         Vector2 feet = { p->position.x + PLAYER_W * 0.5f, p->position.y + PLAYER_H };
         SpawnBurst(feet, 8, 140.0f, 0.4f, 3.5f, (Color) { 210, 200, 170, 255 });
         p->usedDoubleJump = false;
+        p->usedDash = false;
         p->coyoteTimer = 0.0f;
     }
 }
@@ -1427,6 +1438,8 @@ static void RespawnPlayer(Player* p)
     p->coyoteTimer = 0.0f;
     p->jumpBufferTimer = 0.0f;
     p->usedDoubleJump = false;
+    p->usedDash = false;
+    p->dashTimer = 0.0f;
     p->scale = (Vector2){ 1.0f, 1.0f };
 }
 
@@ -1526,13 +1539,129 @@ static void DrawGhost(int level, float t)
     Color body = (Color){ 130, 210, 255, 110 };
     Color edge = (Color){ 40, 110, 170, 150 };
     if (s.grappling)
-        DrawLineEx((Vector2){ s.pos.x + PLAYER_W * 0.5f, s.pos.y + PLAYER_H * 0.5f }, s.anchor, 1.5f, (Color){ 130, 210, 255, 90 });
+        DrawLineEx((Vector2) { s.pos.x + PLAYER_W * 0.5f, s.pos.y + PLAYER_H * 0.5f }, s.anchor, 1.5f, (Color) { 130, 210, 255, 90 });
     Rectangle r = { s.pos.x, s.pos.y, PLAYER_W, PLAYER_H };
     DrawRectangleRec(r, body);
     DrawRectangleLinesEx(r, 2, edge);
-    DrawCircle((int)(r.x + PLAYER_W * 0.5f + s.facing * 8.0f), (int)(r.y + 14), 3, (Color){ 255, 255, 255, 170 });
+    DrawCircle((int)(r.x + PLAYER_W * 0.5f + s.facing * 8.0f), (int)(r.y + 14), 3, (Color) { 255, 255, 255, 170 });
     const char* tag = "PB";
-    DrawText(tag, (int)(r.x + PLAYER_W * 0.5f - MeasureText(tag, 12) * 0.5f), (int)r.y - 16, 12, (Color){ 130, 210, 255, 220 });
+    DrawText(tag, (int)(r.x + PLAYER_W * 0.5f - MeasureText(tag, 12) * 0.5f), (int)r.y - 16, 12, (Color) { 130, 210, 255, 220 });
+}
+
+// Ghost/PB persistence: bestTimes + ghostTracks are written to a single save
+// file so personal bests survive between sessions instead of resetting every
+// time the game is launched. Layout is a small custom binary format:
+//   [magic][version][levelCount] then, per level: [bestTime][sampleCount][samples...]
+// Unknown magic, a version we don't recognize, or a file that runs out of
+// bytes partway through is treated as "no save" rather than a crash -- the
+// game just starts fresh with no PBs, same as it always did before this
+// existed.
+#define GHOST_SAVE_PATH     "ghosts.sav"
+#define GHOST_SAVE_MAGIC    0x50424748u  // "HGBP" as a little-endian sentinel
+#define GHOST_SAVE_VERSION  1
+
+static bool GhostReadBytes(const unsigned char** cursor, const unsigned char* end, void* dst, size_t size)
+{
+    if (*cursor + size > end) return false;
+    memcpy(dst, *cursor, size);
+    *cursor += size;
+    return true;
+}
+
+// Called right after a run sets a new personal best (see SaveGhost's call
+// site), so the PB is safe on disk even if the game is closed uncleanly.
+static void SaveGhostData(void)
+{
+    size_t totalSize = sizeof(unsigned int) + sizeof(int) + sizeof(int);
+    for (int i = 0; i < LEVEL_COUNT; i++)
+        totalSize += sizeof(float) + sizeof(int) + (size_t)ghostTracks[i].count * sizeof(GhostSample);
+
+    unsigned char* buffer = (unsigned char*)malloc(totalSize);
+    if (!buffer) return;
+
+    unsigned char* cursor = buffer;
+    unsigned int magic = GHOST_SAVE_MAGIC;
+    int version = GHOST_SAVE_VERSION;
+    int levelCount = LEVEL_COUNT;
+
+    memcpy(cursor, &magic, sizeof(magic));           cursor += sizeof(magic);
+    memcpy(cursor, &version, sizeof(version));       cursor += sizeof(version);
+    memcpy(cursor, &levelCount, sizeof(levelCount)); cursor += sizeof(levelCount);
+
+    for (int i = 0; i < LEVEL_COUNT; i++)
+    {
+        memcpy(cursor, &bestTimes[i], sizeof(float));
+        cursor += sizeof(float);
+
+        int sampleCount = ghostTracks[i].count;
+        memcpy(cursor, &sampleCount, sizeof(int));
+        cursor += sizeof(int);
+
+        if (sampleCount > 0)
+        {
+            size_t bytes = (size_t)sampleCount * sizeof(GhostSample);
+            memcpy(cursor, ghostTracks[i].samples, bytes);
+            cursor += bytes;
+        }
+    }
+
+    SaveFileData(GHOST_SAVE_PATH, buffer, (int)totalSize);
+    free(buffer);
+}
+
+// Called once at startup, before the game loop. If LEVEL_COUNT has grown or
+// shrunk since a save was written, this loads whatever levels still line up
+// and ignores the rest -- it doesn't try to guess which level an entry used
+// to belong to.
+static void LoadGhostData(void)
+{
+    if (!FileExists(GHOST_SAVE_PATH)) return;
+
+    int fileSize = 0;
+    unsigned char* buffer = LoadFileData(GHOST_SAVE_PATH, &fileSize);
+    if (!buffer) return;
+
+    const unsigned char* cursor = buffer;
+    const unsigned char* end = buffer + fileSize;
+
+    unsigned int magic = 0;
+    int version = 0, savedLevelCount = 0;
+    if (!GhostReadBytes(&cursor, end, &magic, sizeof(magic)) || magic != GHOST_SAVE_MAGIC) { UnloadFileData(buffer); return; }
+    if (!GhostReadBytes(&cursor, end, &version, sizeof(version)) || version != GHOST_SAVE_VERSION) { UnloadFileData(buffer); return; }
+    if (!GhostReadBytes(&cursor, end, &savedLevelCount, sizeof(savedLevelCount)) || savedLevelCount < 0) { UnloadFileData(buffer); return; }
+
+    for (int i = 0; i < savedLevelCount; i++)
+    {
+        float best = -1.0f;
+        int sampleCount = 0;
+        if (!GhostReadBytes(&cursor, end, &best, sizeof(best))) break;
+        if (!GhostReadBytes(&cursor, end, &sampleCount, sizeof(sampleCount)) || sampleCount < 0) break;
+
+        size_t sampleBytes = (size_t)sampleCount * sizeof(GhostSample);
+        if (cursor + sampleBytes > end) break; // truncated/corrupt -- stop, keep what already loaded fine
+
+        if (i < LEVEL_COUNT)
+        {
+            bestTimes[i] = best;
+            free(ghostTracks[i].samples);
+            ghostTracks[i].samples = NULL;
+            ghostTracks[i].count = ghostTracks[i].cap = 0;
+
+            if (sampleCount > 0)
+            {
+                GhostSample* samples = (GhostSample*)malloc(sampleBytes);
+                if (samples)
+                {
+                    memcpy(samples, cursor, sampleBytes);
+                    ghostTracks[i].samples = samples;
+                    ghostTracks[i].count = ghostTracks[i].cap = sampleCount;
+                }
+            }
+        }
+        cursor += sampleBytes;
+    }
+
+    UnloadFileData(buffer);
 }
 
 // Level-select previews: each level is drawn once into a small texture at
@@ -1571,16 +1700,16 @@ static void BakeLevelPreview(int index)
     SetTextureFilter(levelPreviews[index].texture, TEXTURE_FILTER_BILINEAR);
 
     BeginTextureMode(levelPreviews[index]);
-    DrawRectangleGradientV(0, 0, PREVIEW_W, PREVIEW_H, (Color){ 150, 200, 240, 255 }, (Color){ 225, 240, 250, 255 });
+    DrawRectangleGradientV(0, 0, PREVIEW_W, PREVIEW_H, (Color) { 150, 200, 240, 255 }, (Color) { 225, 240, 250, 255 });
 
     for (int i = 0; i < solidCount; i++)
     {
         Color c;
         switch (solids[i].type)
         {
-            case SOLID_FLOATING: c = (Color){ 120, 160, 220, 255 }; break;
-            case SOLID_WALL:     c = (Color){ 90, 90, 100, 255 };  break;
-            default:             c = (Color){ 80, 130, 80, 255 };  break;
+        case SOLID_FLOATING: c = (Color){ 120, 160, 220, 255 }; break;
+        case SOLID_WALL:     c = (Color){ 90, 90, 100, 255 };  break;
+        default:             c = (Color){ 80, 130, 80, 255 };  break;
         }
         Rectangle r = solids[i].rect;
         // Keep thin platforms visible: at least 2px in each direction.
@@ -1592,17 +1721,19 @@ static void BakeLevelPreview(int index)
         Rectangle r = spikes[i];
         float w = fmaxf(r.width * sx, 3.0f);
         Vector2 base = { PV_X(r.x), PV_Y(r.y + r.height) };
-        DrawTriangle((Vector2){ base.x, base.y }, (Vector2){ base.x + w * 0.5f, base.y - 4.0f },
-                     (Vector2){ base.x + w, base.y }, (Color){ 190, 40, 40, 255 });
+        DrawTriangle((Vector2) { base.x, base.y }, (Vector2) { base.x + w * 0.5f, base.y - 4.0f },
+            (Vector2) {
+            base.x + w, base.y
+        }, (Color) { 190, 40, 40, 255 });
     }
     for (int i = 0; i < enemyCount; i++)
-        DrawCircleV((Vector2){ PV_X(enemies[i].pos.x), PV_Y(enemies[i].pos.y) - 2.0f }, 2.4f, (Color){ 130, 40, 150, 255 });
+        DrawCircleV((Vector2) { PV_X(enemies[i].pos.x), PV_Y(enemies[i].pos.y) - 2.0f }, 2.4f, (Color) { 130, 40, 150, 255 });
     for (int i = 0; i < coinCount; i++)
-        DrawCircleV((Vector2){ PV_X(coins[i].pos.x), PV_Y(coins[i].pos.y) }, 2.0f, (Color){ 255, 215, 60, 255 });
+        DrawCircleV((Vector2) { PV_X(coins[i].pos.x), PV_Y(coins[i].pos.y) }, 2.0f, (Color) { 255, 215, 60, 255 });
     for (int i = 0; i < anchorCount; i++)
-        DrawCircleV((Vector2){ PV_X(anchors[i].x), PV_Y(anchors[i].y) }, 2.6f, (Color){ 90, 110, 170, 255 });
-    DrawRectangle((int)PV_X(goalRect.x) - 2, (int)PV_Y(goalRect.y) - 4, 6, (int)fmaxf(goalRect.height * sy, 8.0f) + 4, (Color){ 60, 190, 90, 255 });
-    DrawCircleV((Vector2){ PV_X(spawnPoint.x), PV_Y(spawnPoint.y) }, 3.4f, (Color){ 200, 60, 60, 255 });
+        DrawCircleV((Vector2) { PV_X(anchors[i].x), PV_Y(anchors[i].y) }, 2.6f, (Color) { 90, 110, 170, 255 });
+    DrawRectangle((int)PV_X(goalRect.x) - 2, (int)PV_Y(goalRect.y) - 4, 6, (int)fmaxf(goalRect.height * sy, 8.0f) + 4, (Color) { 60, 190, 90, 255 });
+    DrawCircleV((Vector2) { PV_X(spawnPoint.x), PV_Y(spawnPoint.y) }, 3.4f, (Color) { 200, 60, 60, 255 });
 
     EndTextureMode();
 #undef PV_X
@@ -1614,9 +1745,9 @@ static void BakeLevelPreview(int index)
 // glance (especially useful on the longer levels).
 static Vector2 MinimapProject(PreviewTransform tr, Rectangle box, Vector2 worldPos)
 {
-    return (Vector2){
+    return (Vector2) {
         box.x + worldPos.x * tr.sx * (box.width / PREVIEW_W),
-        box.y + (worldPos.y - tr.minY) * tr.sy * (box.height / PREVIEW_H) + tr.offY * (box.height / PREVIEW_H)
+            box.y + (worldPos.y - tr.minY) * tr.sy * (box.height / PREVIEW_H) + tr.offY * (box.height / PREVIEW_H)
     };
 }
 
@@ -1625,26 +1756,30 @@ static void DrawMinimap(int level, Vector2 playerCenter, float levelT, float rea
     PreviewTransform tr = previewTransform[level];
     Rectangle box = { SCREEN_W - PREVIEW_W * 0.5f - 16, 92, PREVIEW_W * 0.5f, PREVIEW_H * 0.5f };
 
-    DrawRectangleRec((Rectangle){ box.x - 4, box.y - 4, box.width + 8, box.height + 8 }, Fade(BLACK, 0.45f));
+    DrawRectangleRec((Rectangle) { box.x - 4, box.y - 4, box.width + 8, box.height + 8 }, Fade(BLACK, 0.45f));
     DrawTexturePro(levelPreviews[level].texture,
-        (Rectangle){ 0, 0, (float)PREVIEW_W, -(float)PREVIEW_H },
-        box, (Vector2){ 0, 0 }, 0.0f, WHITE);
-    DrawRectangleLinesEx(box, 1.5f, (Color){ 230, 230, 235, 200 });
+        (Rectangle) {
+        0, 0, (float)PREVIEW_W, -(float)PREVIEW_H
+    },
+        box, (Vector2) { 0, 0 }, 0.0f, WHITE);
+    DrawRectangleLinesEx(box, 1.5f, (Color) { 230, 230, 235, 200 });
 
     GhostSample ghost;
     if (GetGhostSample(level, levelT, &ghost))
     {
         Vector2 gMark = MinimapProject(tr, box,
-            (Vector2){ ghost.pos.x + PLAYER_W * 0.5f, ghost.pos.y + PLAYER_H * 0.5f });
-        DrawCircleV(gMark, 3.0f, (Color){ 130, 210, 255, 230 });
-        DrawCircleLines((int)gMark.x, (int)gMark.y, 3.0f, (Color){ 20, 60, 100, 220 });
+            (Vector2) {
+            ghost.pos.x + PLAYER_W * 0.5f, ghost.pos.y + PLAYER_H * 0.5f
+        });
+        DrawCircleV(gMark, 3.0f, (Color) { 130, 210, 255, 230 });
+        DrawCircleLines((int)gMark.x, (int)gMark.y, 3.0f, (Color) { 20, 60, 100, 220 });
     }
 
     Vector2 mark = MinimapProject(tr, box, playerCenter);
     float pulse = 0.7f + 0.3f * sinf(realT * 6.0f);
-    DrawCircleV(mark, 5.0f * pulse, Fade((Color){ 255, 60, 60, 255 }, 0.35f));
-    DrawCircleV(mark, 3.0f, (Color){ 255, 60, 60, 255 });
-    DrawCircleLines((int)mark.x, (int)mark.y, 3.0f, (Color){ 255, 255, 255, 220 });
+    DrawCircleV(mark, 5.0f * pulse, Fade((Color) { 255, 60, 60, 255 }, 0.35f));
+    DrawCircleV(mark, 3.0f, (Color) { 255, 60, 60, 255 });
+    DrawCircleLines((int)mark.x, (int)mark.y, 3.0f, (Color) { 255, 255, 255, 220 });
 }
 
 // Builds the given level and resets all per-run state (also used for restart).
@@ -1742,6 +1877,7 @@ static void TryFireGrapple(Player* p)
         p->ropeLength = fmaxf(Vector2Distance(center, anchors[best]), GRAPPLE_MIN_LEN);
         p->ropeDirValid = false;
         p->usedDoubleJump = false; // grappling refreshes the double jump for extra chaining fun
+        p->usedDash = false;       // ...and the air dash
         Snd(sndGrapple);
         SpawnBurst(anchors[best], 10, 160.0f, 0.4f, 3.0f, (Color) { 70, 220, 255, 255 });
     }
@@ -2060,7 +2196,7 @@ static bool IsButtonClicked(Rectangle rect)
 }
 
 // Draws a button, highlighted and slightly enlarged while the mouse hovers it.
-static void DrawButton(Rectangle rect, const char *label, int fontSize)
+static void DrawButton(Rectangle rect, const char* label, int fontSize)
 {
     bool hovered = CheckCollisionPointRec(GetMousePosition(), rect);
     Rectangle r = rect;
@@ -2070,7 +2206,7 @@ static void DrawButton(Rectangle rect, const char *label, int fontSize)
     }
 
     Color border = (Color){ 40, 40, 60, 255 };
-    Color bg = hovered ? (Color){ 250, 220, 120, 255 } : (Color){ 235, 235, 245, 255 };
+    Color bg = hovered ? (Color) { 250, 220, 120, 255 } : (Color) { 235, 235, 245, 255 };
 
     Rectangle shadow = { r.x + 3, r.y + 5, r.width, r.height };
     DrawRectangleRounded(shadow, 0.3f, 8, Fade(BLACK, 0.25f));
@@ -2079,7 +2215,7 @@ static void DrawButton(Rectangle rect, const char *label, int fontSize)
 
     int tw = MeasureText(label, fontSize);
     DrawText(label, (int)(r.x + r.width * 0.5f - tw * 0.5f),
-             (int)(r.y + r.height * 0.5f - fontSize * 0.5f), fontSize, border);
+        (int)(r.y + r.height * 0.5f - fontSize * 0.5f), fontSize, border);
 }
 
 // A level-select card: big number, name, and best time. Grows when hovered.
@@ -2093,9 +2229,9 @@ static void DrawLevelCard(Rectangle rect, int number, const char* name, float be
     }
 
     Color border = (Color){ 40, 40, 60, 255 };
-    Color bg = hovered ? (Color){ 250, 220, 120, 255 } : (Color){ 235, 235, 245, 255 };
+    Color bg = hovered ? (Color) { 250, 220, 120, 255 } : (Color) { 235, 235, 245, 255 };
 
-    DrawRectangleRounded((Rectangle){ r.x + 4, r.y + 6, r.width, r.height }, 0.12f, 8, Fade(BLACK, 0.25f));
+    DrawRectangleRounded((Rectangle) { r.x + 4, r.y + 6, r.width, r.height }, 0.12f, 8, Fade(BLACK, 0.25f));
     DrawRectangleRounded(r, 0.12f, 8, bg);
     DrawRectangleRoundedLinesEx(r, 0.12f, 8, 2.0f, border);
 
@@ -2108,15 +2244,17 @@ static void DrawLevelCard(Rectangle rect, int number, const char* name, float be
     DrawText(name, (int)(r.x + r.width * 0.5f - lw * 0.5f), (int)(r.y + 74), 24, border);
 
     Rectangle pv = { r.x + 16, r.y + 108, r.width - 32, (r.width - 32) * PREVIEW_H / PREVIEW_W };
-    DrawTexturePro(preview, (Rectangle){ 0, 0, (float)preview.width, -(float)preview.height }, pv,
-                   (Vector2){ 0, 0 }, 0.0f, WHITE);
+    DrawTexturePro(preview, (Rectangle) { 0, 0, (float)preview.width, -(float)preview.height }, pv,
+        (Vector2) {
+        0, 0
+    }, 0.0f, WHITE);
     DrawRectangleLinesEx(pv, 2.0f, border);
 
     char bestText[32];
     if (best > 0.0f) snprintf(bestText, sizeof(bestText), "Best: %05.2fs", best);
     else snprintf(bestText, sizeof(bestText), "Best: --");
     int bw = MeasureText(bestText, 18);
-    DrawText(bestText, (int)(r.x + r.width * 0.5f - bw * 0.5f), (int)(r.y + r.height - 32), 18, (Color){ 90, 90, 110, 255 });
+    DrawText(bestText, (int)(r.x + r.width * 0.5f - bw * 0.5f), (int)(r.y + r.height - 32), 18, (Color) { 90, 90, 110, 255 });
 }
 
 // Deterministic twinkling starfield overlay (no particle/physics state needed).
@@ -2132,7 +2270,7 @@ static void DrawTwinkleStars(float time)
     }
 }
 
-static void DrawSolid(Solid *s)
+static void DrawSolid(Solid* s)
 {
     Color c;
     switch (s->type)
@@ -2240,7 +2378,7 @@ static void DrawEditorGrid(Camera2D camera)
     float step = EDITOR_GRID * 4.0f;
     float startX = floorf(topLeft.x / step) * step;
     float startY = floorf(topLeft.y / step) * step;
-    Color gridColor = (Color) { 255, 255, 255, 35 };
+    Color gridColor = (Color){ 255, 255, 255, 35 };
 
     for (float x = startX; x < bottomRight.x; x += step)
         DrawLine((int)x, (int)topLeft.y, (int)x, (int)bottomRight.y, gridColor);
@@ -2269,31 +2407,31 @@ static void EditorPlaceRect(EditorTool tool, Vector2 a, Vector2 b)
 
     switch (tool)
     {
-        case TOOL_GROUND:
-            if (isClick) { w = 160.0f; h = 100.0f; }
-            if (w < EDITOR_GRID) w = EDITOR_GRID;
-            if (h < EDITOR_GRID) h = EDITOR_GRID;
-            AddSolid(x0, y0, w, h, SOLID_GROUND);
-            break;
-        case TOOL_FLOATING:
-            if (isClick) { w = 160.0f; h = 30.0f; }
-            if (w < EDITOR_GRID) w = EDITOR_GRID;
-            if (h < 12.0f) h = 12.0f;
-            AddSolid(x0, y0, w, h, SOLID_FLOATING);
-            break;
-        case TOOL_WALL:
-            if (isClick) { w = 30.0f; h = 110.0f; }
-            if (w < 12.0f) w = 12.0f;
-            if (h < EDITOR_GRID) h = EDITOR_GRID;
-            AddSolid(x0, y0, w, h, SOLID_WALL);
-            break;
-        case TOOL_SPIKE:
-            if (isClick) { w = 90.0f; h = 20.0f; }
-            if (w < 20.0f) w = 20.0f;
-            if (h < 10.0f) h = 10.0f;
-            AddSpike(x0, y0, w, h);
-            break;
-        default: break;
+    case TOOL_GROUND:
+        if (isClick) { w = 160.0f; h = 100.0f; }
+        if (w < EDITOR_GRID) w = EDITOR_GRID;
+        if (h < EDITOR_GRID) h = EDITOR_GRID;
+        AddSolid(x0, y0, w, h, SOLID_GROUND);
+        break;
+    case TOOL_FLOATING:
+        if (isClick) { w = 160.0f; h = 30.0f; }
+        if (w < EDITOR_GRID) w = EDITOR_GRID;
+        if (h < 12.0f) h = 12.0f;
+        AddSolid(x0, y0, w, h, SOLID_FLOATING);
+        break;
+    case TOOL_WALL:
+        if (isClick) { w = 30.0f; h = 110.0f; }
+        if (w < 12.0f) w = 12.0f;
+        if (h < EDITOR_GRID) h = EDITOR_GRID;
+        AddSolid(x0, y0, w, h, SOLID_WALL);
+        break;
+    case TOOL_SPIKE:
+        if (isClick) { w = 90.0f; h = 20.0f; }
+        if (w < 20.0f) w = 20.0f;
+        if (h < 10.0f) h = 10.0f;
+        AddSpike(x0, y0, w, h);
+        break;
+    default: break;
     }
     RecalcCustomWorldBounds();
 }
@@ -2311,7 +2449,7 @@ static void EditorPlaceEnemy(Vector2 a, Vector2 b)
 // direct click/drag placement using the exact same Add* calls (and the same
 // draw functions) the built-in levels use, so a custom level is made from
 // literally the same assets as everything else in the game.
-static void RunEditor(Camera2D *camera, GameState *state, Player *player, bool *won, float dt)
+static void RunEditor(Camera2D* camera, GameState* state, Player* player, bool* won, float dt)
 {
     float panSpeed = 600.0f / editorZoom;
     if (IsKeyDown(KEY_RIGHT) || IsKeyDown(KEY_D)) editorCamTarget.x += panSpeed * dt;
@@ -2323,7 +2461,7 @@ static void RunEditor(Camera2D *camera, GameState *state, Player *player, bool *
 
     camera->target = editorCamTarget;
     camera->zoom = editorZoom;
-    camera->offset = (Vector2) { SCREEN_W / 2.0f, SCREEN_H / 2.0f };
+    camera->offset = (Vector2){ SCREEN_W / 2.0f, SCREEN_H / 2.0f };
 
     // ---- Toolbar layout ----
     const int n = NUM_EDITOR_TOOLS;
@@ -2332,15 +2470,15 @@ static void RunEditor(Camera2D *camera, GameState *state, Player *player, bool *
     float startX = (SCREEN_W - totalW) * 0.5f;
     Rectangle toolButtons[NUM_EDITOR_TOOLS];
     for (int i = 0; i < n; i++)
-        toolButtons[i] = (Rectangle) { startX + i * (btnW + gap), 12, btnW, btnH };
+        toolButtons[i] = (Rectangle){ startX + i * (btnW + gap), 12, btnW, btnH };
 
-    const char *actionLabels[5] = { "SAVE", "LOAD", "CLEAR", "PLAY (P)", "BACK" };
+    const char* actionLabels[5] = { "SAVE", "LOAD", "CLEAR", "PLAY (P)", "BACK" };
     float aBtnW = 170.0f, aBtnH = 44.0f, aGap = 10.0f;
     float aTotalW = 5 * aBtnW + 4 * aGap;
     float aStartX = (SCREEN_W - aTotalW) * 0.5f;
     Rectangle actionButtons[5];
     for (int i = 0; i < 5; i++)
-        actionButtons[i] = (Rectangle) { aStartX + i * (aBtnW + aGap), 64, aBtnW, aBtnH };
+        actionButtons[i] = (Rectangle){ aStartX + i * (aBtnW + aGap), 64, aBtnW, aBtnH };
 
     Vector2 mouse = GetMousePosition();
     Rectangle uiPanel = { 0, 0, SCREEN_W, 118 };
@@ -2392,12 +2530,12 @@ static void RunEditor(Camera2D *camera, GameState *state, Player *player, bool *
             }
             else if (editorTool == TOOL_GOAL)
             {
-                goalRect = (Rectangle) { snapped.x - 20, snapped.y - 70, 40, 70 };
+                goalRect = (Rectangle){ snapped.x - 20, snapped.y - 70, 40, 70 };
                 RecalcCustomWorldBounds();
             }
             else if (editorTool == TOOL_SPAWN)
             {
-                spawnPoint = (Vector2) { snapped.x - PLAYER_W * 0.5f, snapped.y - PLAYER_H };
+                spawnPoint = (Vector2){ snapped.x - PLAYER_W * 0.5f, snapped.y - PLAYER_H };
                 RecalcCustomWorldBounds();
             }
             else
@@ -2466,13 +2604,15 @@ static void RunEditor(Camera2D *camera, GameState *state, Player *player, bool *
     {
         DrawButton(toolButtons[i], editorToolLabels[i], 16);
         if ((int)editorTool == i)
-            DrawRectangleLinesEx((Rectangle) { toolButtons[i].x - 3, toolButtons[i].y - 3,
-                                  toolButtons[i].width + 6, toolButtons[i].height + 6 },
-                                  3, (Color) { 255, 230, 120, 255 });
+            DrawRectangleLinesEx((Rectangle) {
+            toolButtons[i].x - 3, toolButtons[i].y - 3,
+                toolButtons[i].width + 6, toolButtons[i].height + 6
+        },
+                3, (Color) { 255, 230, 120, 255 });
     }
     for (int i = 0; i < 5; i++) DrawButton(actionButtons[i], actionLabels[i], 16);
 
-    const char *hint = "Left-click/drag: place    Right-click: erase    WASD/Arrows: pan    Wheel: zoom    1-9: tools";
+    const char* hint = "Left-click/drag: place    Right-click: erase    WASD/Arrows: pan    Wheel: zoom    1-9: tools";
     int hw = MeasureText(hint, 16);
     DrawText(hint, SCREEN_W / 2 - hw / 2, 120, 16, (Color) { 230, 230, 235, 255 });
 
@@ -2485,8 +2625,8 @@ static void RunEditor(Camera2D *camera, GameState *state, Player *player, bool *
 
     char counts[160];
     snprintf(counts, sizeof(counts), "Solids %d/%d   Spikes %d/%d   Anchors %d/%d   Coins %d/%d   Enemies %d/%d",
-             solidCount, MAX_SOLIDS, spikeCount, MAX_SPIKES, anchorCount, MAX_ANCHORS,
-             coinCount, MAX_COINS, enemyCount, MAX_ENEMIES);
+        solidCount, MAX_SOLIDS, spikeCount, MAX_SPIKES, anchorCount, MAX_ANCHORS,
+        coinCount, MAX_COINS, enemyCount, MAX_ENEMIES);
     DrawText(counts, 12, SCREEN_H - 26, 16, (Color) { 230, 230, 235, 255 });
 
     EndDrawing();
@@ -2501,6 +2641,7 @@ int main(void)
     SetExitKey(KEY_NULL); // ESC is ours to use for menu navigation, not window close
     SetTargetFPS(60);
     InitGameAudio();
+    LoadGhostData(); // restore bestTimes + ghost replays saved from earlier sessions
 
     for (int i = 0; i < LEVEL_COUNT; i++) BakeLevelPreview(i);
 
@@ -2516,7 +2657,7 @@ int main(void)
     GameState state = STATE_MENU;
 
     Rectangle playButton = { SCREEN_W / 2.0f - 110, SCREEN_H / 2.0f - 30, 220, 56 };
-    Rectangle quitButton  = { SCREEN_W / 2.0f - 110, SCREEN_H / 2.0f + 40, 220, 56 };
+    Rectangle quitButton = { SCREEN_W / 2.0f - 110, SCREEN_H / 2.0f + 40, 220, 56 };
     float menuTime = 0.0f;
     bool playHoveredPrev = false;
     bool quitHoveredPrev = false;
@@ -2558,7 +2699,7 @@ int main(void)
             {
                 Snd(sndGrapple);
                 Vector2 btnCenter = { playButton.x + playButton.width * 0.5f, playButton.y + playButton.height * 0.5f };
-                SpawnBurst(btnCenter, 16, 200.0f, 0.5f, 3.5f, (Color){ 250, 220, 120, 255 });
+                SpawnBurst(btnCenter, 16, 200.0f, 0.5f, 3.5f, (Color) { 250, 220, 120, 255 });
                 state = STATE_LEVEL_SELECT;
             }
             if (quitClicked) quitRequested = true;
@@ -2566,31 +2707,31 @@ int main(void)
             UpdateParticles(dt);
 
             BeginDrawing();
-            ClearBackground((Color){ 190, 220, 245, 255 });
+            ClearBackground((Color) { 190, 220, 245, 255 });
             DrawParallaxBackground(camera);
             DrawTwinkleStars(menuTime);
 
             Rectangle panel = { SCREEN_W / 2.0f - 340, SCREEN_H / 2.0f - 220, 680, 420 };
             DrawRectangleRounded(panel, 0.08f, 12, Fade(BLACK, 0.22f));
 
-            const char *title = "AI PLATFORMER";
+            const char* title = "AI PLATFORMER";
             int fontSize = 64;
             int tw = MeasureText(title, fontSize);
             float titleY = SCREEN_H / 2.0f - 160.0f + sinf(menuTime * 1.6f) * 5.0f;
             DrawText(title, SCREEN_W / 2 - tw / 2 + 3, (int)titleY + 3, fontSize, Fade(BLACK, 0.35f));
-            DrawText(title, SCREEN_W / 2 - tw / 2, (int)titleY, fontSize, (Color){ 255, 236, 160, 255 });
+            DrawText(title, SCREEN_W / 2 - tw / 2, (int)titleY, fontSize, (Color) { 255, 236, 160, 255 });
 
             DrawButton(playButton, "PLAY", 26);
             DrawButton(quitButton, "QUIT", 26);
 
             DrawParticles();
 
-            const char *controls1 = "A/D or Arrows: run   SPACE: jump (double-jump in air!)   F / Click: grapple";
-            const char *controls2 = "While grappling -> W/S or Up/Down: reel in/out    R: restart    ESC: level select";
+            const char* controls1 = "A/D or Arrows: run   SPACE: jump (double-jump in air!)   SHIFT: air dash   F / Click: grapple";
+            const char* controls2 = "While grappling -> W/S or Up/Down: reel in/out    R: restart    ESC: level select";
             int cw1 = MeasureText(controls1, 16);
             int cw2 = MeasureText(controls2, 16);
-            DrawText(controls1, SCREEN_W / 2 - cw1 / 2, SCREEN_H / 2 + 120, 16, (Color){ 230, 230, 235, 255 });
-            DrawText(controls2, SCREEN_W / 2 - cw2 / 2, SCREEN_H / 2 + 144, 16, (Color){ 230, 230, 235, 255 });
+            DrawText(controls1, SCREEN_W / 2 - cw1 / 2, SCREEN_H / 2 + 120, 16, (Color) { 230, 230, 235, 255 });
+            DrawText(controls2, SCREEN_W / 2 - cw2 / 2, SCREEN_H / 2 + 144, 16, (Color) { 230, 230, 235, 255 });
 
             EndDrawing();
             continue;
@@ -2642,18 +2783,18 @@ int main(void)
             UpdateParticles(dt);
 
             BeginDrawing();
-            ClearBackground((Color){ 190, 220, 245, 255 });
+            ClearBackground((Color) { 190, 220, 245, 255 });
             DrawParallaxBackground(camera);
             DrawTwinkleStars(menuTime);
 
             Rectangle panel = { SCREEN_W / 2.0f - 570, SCREEN_H / 2.0f - 250, 1140, 520 };
             DrawRectangleRounded(panel, 0.06f, 12, Fade(BLACK, 0.22f));
 
-            const char *title = "SELECT LEVEL";
+            const char* title = "SELECT LEVEL";
             int tw = MeasureText(title, 56);
             float titleY = SCREEN_H / 2.0f - 200.0f + sinf(menuTime * 1.6f) * 4.0f;
             DrawText(title, SCREEN_W / 2 - tw / 2 + 3, (int)titleY + 3, 56, Fade(BLACK, 0.35f));
-            DrawText(title, SCREEN_W / 2 - tw / 2, (int)titleY, 56, (Color){ 255, 236, 160, 255 });
+            DrawText(title, SCREEN_W / 2 - tw / 2, (int)titleY, 56, (Color) { 255, 236, 160, 255 });
 
             for (int i = 0; i < LEVEL_COUNT; i++)
                 DrawLevelCard(levelCards[i], i + 1, levelNames[i], bestTimes[i], levelPreviews[i].texture);
@@ -2663,7 +2804,7 @@ int main(void)
             char hint[96];
             snprintf(hint, sizeof(hint), "Click a level or press 1-%d    CREATE LEVEL: build your own    ESC: back", LEVEL_COUNT);
             int hw = MeasureText(hint, 16);
-            DrawText(hint, SCREEN_W / 2 - hw / 2, SCREEN_H / 2 + 235, 16, (Color){ 230, 230, 235, 255 });
+            DrawText(hint, SCREEN_W / 2 - hw / 2, SCREEN_H / 2 + 235, 16, (Color) { 230, 230, 235, 255 });
 
             DrawParticles();
             EndDrawing();
@@ -2798,8 +2939,34 @@ int main(void)
                 else TryFireGrapple(&player);
             }
 
+            // ---- Air dash: one burst per airtime, refreshed by grounding or grappling ----
+            if (player.dashTimer > 0.0f) player.dashTimer -= dt;
+
+            if ((IsKeyPressed(KEY_LEFT_SHIFT) || IsKeyPressed(KEY_RIGHT_SHIFT)) &&
+                !player.onGround && !player.grappling && !player.usedDash)
+            {
+                player.dashDir = (moveDir != 0.0f) ? moveDir : player.facing;
+                // Guarantee at least dash speed; never slow down a faster swing/fall.
+                player.dashSpeed = fmaxf(fabsf(player.velocity.x), DASH_SPEED);
+                player.velocity.x = player.dashDir * player.dashSpeed;
+                player.velocity.y *= 0.2f; // flatten the arc into a burst
+                player.dashTimer = DASH_DURATION;
+                player.usedDash = true;
+                player.scale = (Vector2){ 1.5f, 0.6f };
+                Snd(sndDash);
+                Shake(2.0f, 0.05f);
+                SpawnBurst(PlayerCenter(&player), 12, 220.0f, 0.3f, 3.0f, (Color) { 255, 240, 120, 255 });
+            }
+            else if (player.dashTimer > 0.0f)
+            {
+                // Hold the burst speed for the rest of its duration, overriding
+                // whatever the run/air accel above did this frame.
+                player.velocity.x = player.dashDir * player.dashSpeed;
+            }
+
             // ---- Gravity ----
-            player.velocity.y += GRAVITY * dt;
+            float gravityMult = (player.dashTimer > 0.0f) ? DASH_GRAVITY_MULT : 1.0f;
+            player.velocity.y += GRAVITY * gravityMult * dt;
             if (!player.grappling) player.velocity.y = fminf(player.velocity.y, MAX_FALL_SPEED);
 
             // ---- Physics step ----
@@ -2852,6 +3019,7 @@ int main(void)
                 {
                     bestTimes[currentLevel] = levelTime;
                     SaveGhost(currentLevel); // new personal best: this run becomes the ghost
+                    SaveGhostData();         // ...and write it to disk so it survives a restart
                 }
             }
         }
@@ -2999,7 +3167,7 @@ int main(void)
 
         // ---- HUD ----
         DrawRectangle(0, 0, SCREEN_W, 84, Fade(BLACK, 0.35f));
-        DrawText("A/D or Arrows: run   SPACE: jump (double-jump in air!)   F / Click: grapple",
+        DrawText("A/D or Arrows: run   SPACE: jump (double-jump in air!)   SHIFT: air dash   F / Click: grapple",
             16, 8, 18, RAYWHITE);
         DrawText("While grappling -> W/S or Up/Down: reel in/out    R: restart    ESC: level select",
             16, 32, 18, RAYWHITE);
