@@ -26,6 +26,10 @@
 #define COYOTE_TIME       0.10f
 #define JUMP_BUFFER_TIME  0.12f
 
+#define DASH_SPEED        950.0f  // fixed horizontal speed during a dash burst
+#define DASH_DURATION     0.16f   // how long the burst lasts
+#define DASH_GRAVITY_MULT 0.15f   // gravity is mostly suspended during the burst
+
 #define PLAYER_W 30.0f
 #define PLAYER_H 44.0f
 
@@ -104,6 +108,10 @@ typedef struct {
     float coyoteTimer;
     float jumpBufferTimer;
     bool  usedDoubleJump;
+    bool  usedDash;
+    float dashTimer;     // > 0 while a dash burst is active
+    float dashDir;       // locked burst direction, set when the dash fires
+    float dashSpeed;     // locked burst magnitude: max(DASH_SPEED, speed you already had)
     Vector2 scale;
 
     Vector2 ropeDir;
@@ -271,7 +279,7 @@ static const char* editorToolLabels[NUM_EDITOR_TOOLS] = {
     "GROUND", "FLOAT", "WALL", "SPIKE", "ANCHOR", "COIN", "ENEMY", "GOAL", "SPAWN"
 };
 
-static Sound sndJump, sndDoubleJump, sndLand, sndGrapple, sndWallBounce, sndCoin, sndWin, sndDeath;
+static Sound sndJump, sndDoubleJump, sndLand, sndGrapple, sndWallBounce, sndCoin, sndWin, sndDeath, sndDash;
 static bool audioReady = false;
 
 static void AddSolid(float x, float y, float w, float h, SolidType type)
@@ -668,6 +676,7 @@ static void InitGameAudio(void)
     sndCoin = MakeTone(900.0f, 0.14f, 700.0f, false);
     sndWin = MakeTone(600.0f, 0.55f, 500.0f, false);
     sndDeath = MakeTone(300.0f, 0.30f, -220.0f, true);
+    sndDash = MakeTone(220.0f, 0.10f, 900.0f, false);
 }
 
 static void ShutdownGameAudio(void)
@@ -681,6 +690,7 @@ static void ShutdownGameAudio(void)
     UnloadSound(sndCoin);
     UnloadSound(sndWin);
     UnloadSound(sndDeath);
+    UnloadSound(sndDash);
     CloseAudioDevice();
 }
 
@@ -1556,6 +1566,7 @@ static void MoveAndCollide(Player* p, float dt)
         Vector2 feet = { p->position.x + PLAYER_W * 0.5f, p->position.y + PLAYER_H };
         SpawnBurst(feet, 8, 140.0f, 0.4f, 3.5f, (Color) { 210, 200, 170, 255 });
         p->usedDoubleJump = false;
+        p->usedDash = false;
         p->coyoteTimer = 0.0f;
     }
 }
@@ -1635,6 +1646,8 @@ static void RespawnPlayer(Player* p)
     p->coyoteTimer = 0.0f;
     p->jumpBufferTimer = 0.0f;
     p->usedDoubleJump = false;
+    p->usedDash = false;
+    p->dashTimer = 0.0f;
     p->scale = (Vector2){ 1.0f, 1.0f };
 }
 
@@ -1928,6 +1941,7 @@ static void TryFireGrapple(Player* p)
         p->ropeLength = fmaxf(Vector2Distance(center, anchors[best]), GRAPPLE_MIN_LEN);
         p->ropeDirValid = false;
         p->usedDoubleJump = false;
+        p->usedDash = false;
         Snd(sndGrapple);
         SpawnBurst(anchors[best], 10, 160.0f, 0.4f, 3.0f, (Color) { 70, 220, 255, 255 });
     }
@@ -3214,7 +3228,7 @@ int main(void)
 
             DrawParticles();
 
-            const char* controls1 = "A/D or Arrows: run   SPACE: jump (double-jump in air!)   F / Click: grapple";
+            const char* controls1 = "A/D or Arrows: run   SPACE: jump (double-jump in air!)   SHIFT: air dash   F / Click: grapple";
             const char* controls2 = "While grappling -> W/S or Up/Down: reel in/out    R: restart    ESC: level select";
             int cw1 = MeasureText(controls1, 16);
             int cw2 = MeasureText(controls2, 16);
@@ -3412,7 +3426,33 @@ int main(void)
                 else TryFireGrapple(&player);
             }
 
-            player.velocity.y += GRAVITY * dt;
+            // ---- Air dash: one burst per airtime, refreshed by grounding or grappling ----
+            if (player.dashTimer > 0.0f) player.dashTimer -= dt;
+
+            if ((IsKeyPressed(KEY_LEFT_SHIFT) || IsKeyPressed(KEY_RIGHT_SHIFT)) &&
+                !player.onGround && !player.grappling && !player.usedDash)
+            {
+                player.dashDir = (moveDir != 0.0f) ? moveDir : player.facing;
+                // Guarantee at least dash speed; never slow down a faster swing/fall.
+                player.dashSpeed = fmaxf(fabsf(player.velocity.x), DASH_SPEED);
+                player.velocity.x = player.dashDir * player.dashSpeed;
+                player.velocity.y *= 0.2f; // flatten the arc into a burst
+                player.dashTimer = DASH_DURATION;
+                player.usedDash = true;
+                player.scale = (Vector2){ 1.5f, 0.6f };
+                Snd(sndDash);
+                Shake(2.0f, 0.05f);
+                SpawnBurst(PlayerCenter(&player), 12, 220.0f, 0.3f, 3.0f, (Color) { 255, 240, 120, 255 });
+            }
+            else if (player.dashTimer > 0.0f)
+            {
+                // Hold the burst speed for the rest of its duration, overriding
+                // whatever the run/air accel above did this frame.
+                player.velocity.x = player.dashDir * player.dashSpeed;
+            }
+
+            float gravityMult = (player.dashTimer > 0.0f) ? DASH_GRAVITY_MULT : 1.0f;
+            player.velocity.y += GRAVITY * gravityMult * dt;
             if (!player.grappling) player.velocity.y = fminf(player.velocity.y, MAX_FALL_SPEED);
 
             UpdatePlatforms(&player, dt);
@@ -3587,7 +3627,7 @@ int main(void)
         DrawSpeedVignette(speedIntensity);
 
         DrawRectangle(0, 0, SCREEN_W, 84, Fade(BLACK, 0.35f));
-        DrawText("A/D or Arrows: run   SPACE: jump (double-jump in air!)   F / Click: grapple",
+        DrawText("A/D or Arrows: run   SPACE: jump (double-jump in air!)   SHIFT: air dash   F / Click: grapple",
             16, 8, 18, RAYWHITE);
         DrawText("While grappling -> W/S or Up/Down: reel in/out    R: restart    ESC: level select",
             16, 32, 18, RAYWHITE);
