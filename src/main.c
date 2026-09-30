@@ -1597,8 +1597,16 @@ static void ResolveSolidOverlap(Player* p)
         else
         {
             p->position.y += pushY;
-            if (pushY < 0.0f) p->onGround = true;
-            p->velocity.y = 0.0f;
+            // Only treat this as a landing/ceiling-bump if velocity is what's
+            // driving the overlap. Otherwise a platform that rises into the
+            // player's still-unmoved spot on the exact frame they jump would
+            // zero out the jump velocity we just set, cancelling the jump.
+            bool movingIntoIt = (pushY < 0.0f) ? (p->velocity.y > 0.0f) : (p->velocity.y < 0.0f);
+            if (movingIntoIt)
+            {
+                if (pushY < 0.0f) p->onGround = true;
+                p->velocity.y = 0.0f;
+            }
         }
         pr = PlayerRect(p->position);
     }
