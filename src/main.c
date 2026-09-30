@@ -1296,26 +1296,35 @@ static void SaveGhost(int level)
     ghostTracks[level].count = ghostTracks[level].cap = recordingTrack.count;
 }
 
-static void DrawGhost(int level, float t)
+// Interpolated ghost sample at run time t, or false if that level has no
+// ghost yet. Shared by the in-level ghost drawing and the minimap marker so
+// they always agree on where the ghost currently is.
+static bool GetGhostSample(int level, float t, GhostSample* out)
 {
     GhostTrack* g = &ghostTracks[level];
-    if (g->count < 2) return;
+    if (g->count < 2) return false;
 
     float f = t * GHOST_HZ;
     int i = (int)f;
-    GhostSample s;
     if (i >= g->count - 1)
     {
-        s = g->samples[g->count - 1];
+        *out = g->samples[g->count - 1];
     }
     else
     {
         GhostSample a = g->samples[i], b = g->samples[i + 1];
         float k = f - (float)i;
-        s = a;
-        s.pos = Vector2Lerp(a.pos, b.pos, k);
-        s.anchor = Vector2Lerp(a.anchor, b.anchor, k);
+        *out = a;
+        out->pos = Vector2Lerp(a.pos, b.pos, k);
+        out->anchor = Vector2Lerp(a.anchor, b.anchor, k);
     }
+    return true;
+}
+
+static void DrawGhost(int level, float t)
+{
+    GhostSample s;
+    if (!GetGhostSample(level, t, &s)) return;
 
     Color body = (Color){ 130, 210, 255, 110 };
     Color edge = (Color){ 40, 110, 170, 150 };
@@ -1335,6 +1344,11 @@ static void DrawGhost(int level, float t)
 #define PREVIEW_H 128
 static RenderTexture2D levelPreviews[LEVEL_COUNT];
 
+// The mapping each preview was baked with, saved so the in-game minimap can
+// project the live player position onto the exact same texture.
+typedef struct { float sx, sy, minY, offY; } PreviewTransform;
+static PreviewTransform previewTransform[LEVEL_COUNT];
+
 static void BakeLevelPreview(int index)
 {
     BuildLevel(index);
@@ -1352,6 +1366,7 @@ static void BakeLevelPreview(int index)
     float sx = (float)PREVIEW_W / worldWidth;
     float sy = fminf((float)PREVIEW_H / (maxY - minY), sx * 3.0f);
     float offY = ((float)PREVIEW_H - (maxY - minY) * sy) * 0.5f;
+    previewTransform[index] = (PreviewTransform){ sx, sy, minY, offY };
 #define PV_X(wx) ((wx) * sx)
 #define PV_Y(wy) (((wy) - minY) * sy + offY)
 
@@ -1395,6 +1410,44 @@ static void BakeLevelPreview(int index)
     EndTextureMode();
 #undef PV_X
 #undef PV_Y
+}
+
+// In-game minimap: the baked preview texture with a blinking marker for the
+// player's current position, so progress through the level is visible at a
+// glance (especially useful on the longer levels).
+static Vector2 MinimapProject(PreviewTransform tr, Rectangle box, Vector2 worldPos)
+{
+    return (Vector2){
+        box.x + worldPos.x * tr.sx * (box.width / PREVIEW_W),
+        box.y + (worldPos.y - tr.minY) * tr.sy * (box.height / PREVIEW_H) + tr.offY * (box.height / PREVIEW_H)
+    };
+}
+
+static void DrawMinimap(int level, Vector2 playerCenter, float levelT, float realT)
+{
+    PreviewTransform tr = previewTransform[level];
+    Rectangle box = { SCREEN_W - PREVIEW_W * 0.5f - 16, 92, PREVIEW_W * 0.5f, PREVIEW_H * 0.5f };
+
+    DrawRectangleRec((Rectangle){ box.x - 4, box.y - 4, box.width + 8, box.height + 8 }, Fade(BLACK, 0.45f));
+    DrawTexturePro(levelPreviews[level].texture,
+        (Rectangle){ 0, 0, (float)PREVIEW_W, -(float)PREVIEW_H },
+        box, (Vector2){ 0, 0 }, 0.0f, WHITE);
+    DrawRectangleLinesEx(box, 1.5f, (Color){ 230, 230, 235, 200 });
+
+    GhostSample ghost;
+    if (GetGhostSample(level, levelT, &ghost))
+    {
+        Vector2 gMark = MinimapProject(tr, box,
+            (Vector2){ ghost.pos.x + PLAYER_W * 0.5f, ghost.pos.y + PLAYER_H * 0.5f });
+        DrawCircleV(gMark, 3.0f, (Color){ 130, 210, 255, 230 });
+        DrawCircleLines((int)gMark.x, (int)gMark.y, 3.0f, (Color){ 20, 60, 100, 220 });
+    }
+
+    Vector2 mark = MinimapProject(tr, box, playerCenter);
+    float pulse = 0.7f + 0.3f * sinf(realT * 6.0f);
+    DrawCircleV(mark, 5.0f * pulse, Fade((Color){ 255, 60, 60, 255 }, 0.35f));
+    DrawCircleV(mark, 3.0f, (Color){ 255, 60, 60, 255 });
+    DrawCircleLines((int)mark.x, (int)mark.y, 3.0f, (Color){ 255, 255, 255, 220 });
 }
 
 // Builds the given level and resets all per-run state (also used for restart).
@@ -2474,6 +2527,9 @@ int main(void)
         snprintf(hud, sizeof(hud), "Coins: %d/%d      Time: %05.2fs", coinsCollected, coinCount, levelTime);
         int hw = MeasureText(hud, 22);
         DrawText(hud, SCREEN_W - hw - 16, 12, 22, (Color) { 255, 230, 120, 255 });
+
+        // ---- Minimap ----
+        DrawMinimap(currentLevel, PlayerCenter(&player), levelTime, (float)GetTime());
 
         // ---- MPH counter (bottom center) ----
         {
