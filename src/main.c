@@ -211,8 +211,6 @@ typedef enum {
 
 static BackgroundTheme currentBgTheme = BG_DEFAULT;
 
-// A small colour scheme for the six solid types so each level reads as its
-// own material: grass, sandstone, cloudstone, ice, brass, etc.
 typedef struct {
     Color ground;
     Color floating;
@@ -254,6 +252,8 @@ static const SolidPalette paletteEditor = {
     { 110, 190,  90, 255 }
 };
 
+// Inline initialiser avoids the C restriction that a mutable global cannot be
+// initialised with another aggregate. Same values as paletteMeadow.
 static SolidPalette currentPalette = {
     {  80, 130,  80, 255 }, { 120, 160, 220, 255 }, {  90,  90, 100, 255 },
     {  80, 180, 200, 255 }, { 190, 140,  80, 255 }, { 170, 110, 220, 255 },
@@ -548,10 +548,13 @@ static void DrawEnemies(float t)
         float bob = sinf(t * 8.0f + i * 1.7f) * 2.0f;
         Rectangle body = { r.x, r.y + bob, r.width, r.height };
 
+        // Dark silhouette ring so the enemy reads against any background
+        DrawEllipse((int)(body.x + body.width * 0.5f), (int)(body.y + body.height * 0.6f),
+            body.width * 0.6f, body.height * 0.6f, (Color) { 20, 4, 26, 255 });
         DrawEllipse((int)(body.x + body.width * 0.5f), (int)(body.y + body.height * 0.6f),
             body.width * 0.5f, body.height * 0.5f, (Color) { 130, 40, 150, 255 });
         DrawEllipseLines((int)(body.x + body.width * 0.5f), (int)(body.y + body.height * 0.6f),
-            body.width * 0.5f, body.height * 0.5f, (Color) { 60, 10, 70, 255 });
+            body.width * 0.5f, body.height * 0.5f, (Color) { 30, 5, 35, 255 });
 
         for (int k = 0; k < 3; k++)
         {
@@ -569,6 +572,7 @@ static void DrawEnemies(float t)
         }
 
         float eyeDir = enemies[i].dir;
+        DrawCircle((int)(body.x + body.width * 0.5f + eyeDir * 5.0f), (int)(body.y + body.height * 0.55f), 3.5f, BLACK);
         DrawCircle((int)(body.x + body.width * 0.5f + eyeDir * 5.0f), (int)(body.y + body.height * 0.55f), 3.0f, WHITE);
         DrawCircle((int)(body.x + body.width * 0.5f + eyeDir * 5.0f), (int)(body.y + body.height * 0.55f), 1.3f, BLACK);
     }
@@ -1761,6 +1765,102 @@ static RenderTexture2D levelPreviews[LEVEL_COUNT];
 typedef struct { float sx, sy, minY, offY; } PreviewTransform;
 static PreviewTransform previewTransform[LEVEL_COUNT];
 
+// Themes a preview backdrop so the level-select cards read as a small slice
+// of each level's world instead of a generic blue sky.
+static void DrawPreviewBackdrop(int index)
+{
+    switch (index)
+    {
+    case 0: // meadow
+        DrawRectangleGradientV(0, 0, PREVIEW_W, PREVIEW_H,
+            (Color) {
+            150, 200, 240, 255
+        }, (Color) { 225, 240, 250, 255 });
+        DrawCircle(PREVIEW_W - 60, 30, 26, (Color) { 255, 245, 210, 220 });
+        for (int i = -1; i < 3; i++)
+        {
+            float bx = i * 200.0f + 40.0f;
+            DrawCircle((int)bx, PREVIEW_H + 20, 90, (Color) { 170, 200, 175, 255 });
+        }
+        break;
+    case 1: // cavern
+        DrawRectangleGradientV(0, 0, PREVIEW_W, PREVIEW_H,
+            (Color) {
+            32, 14, 18, 255
+        }, (Color) { 92, 38, 30, 255 });
+        for (int i = -1; i < 5; i++)
+        {
+            float bx = i * 120.0f;
+            DrawTriangle((Vector2) { bx, 0 }, (Vector2) { bx + 40, 0 }, (Vector2) { bx + 20, 60 }, (Color) { 52, 22, 22, 220 });
+        }
+        DrawCircle(PREVIEW_W / 2, PREVIEW_H + 40, 80, (Color) { 255, 130, 40, 40 });
+        break;
+    case 2: // sky
+        DrawRectangleGradientV(0, 0, PREVIEW_W, PREVIEW_H,
+            (Color) {
+            90, 160, 230, 255
+        }, (Color) { 215, 235, 250, 255 });
+        DrawCircle(60, 30, 22, (Color) { 255, 250, 225, 235 });
+        for (int i = 0; i < 3; i++)
+        {
+            float bx = 40.0f + i * 160.0f;
+            float h = 40.0f + (i * 17 % 30);
+            DrawRectangle((int)bx, (int)(PREVIEW_H - h), 34, (int)h, (Color) { 110, 140, 175, 150 });
+        }
+        for (int i = 0; i < 3; i++)
+        {
+            float cx = 30.0f + i * 170.0f;
+            float cy = 24.0f + i * 24.0f;
+            DrawCircle((int)cx, (int)cy, 14, (Color) { 255, 255, 255, 190 });
+            DrawCircle((int)cx + 16, (int)cy + 4, 11, (Color) { 255, 255, 255, 190 });
+        }
+        break;
+    case 3: // dusk city
+        DrawRectangleGradientV(0, 0, PREVIEW_W, PREVIEW_H,
+            (Color) {
+            60, 40, 90, 255
+        }, (Color) { 240, 150, 90, 255 });
+        DrawCircle(PREVIEW_W - 70, PREVIEW_H - 30, 22, (Color) { 255, 220, 160, 230 });
+        for (int i = 0; i < 5; i++)
+        {
+            float bx = 20.0f + i * 90.0f;
+            float h = 30.0f + (i * 11 % 40);
+            DrawRectangle((int)bx, (int)(PREVIEW_H - h), 44, (int)h, (Color) { 30, 26, 46, 220 });
+            for (int wy = 0; wy < (int)(h / 14); wy++)
+                DrawRectangle((int)bx + 6, (int)(PREVIEW_H - h + 6 + wy * 14), 4, 6, (Color) { 255, 200, 120, 180 });
+        }
+        break;
+    case 4: // clocktower
+        DrawRectangleGradientV(0, 0, PREVIEW_W, PREVIEW_H,
+            (Color) {
+            58, 36, 22, 255
+        }, (Color) { 118, 78, 42, 255 });
+        for (int i = 0; i < 4; i++)
+            DrawRectangle(20 + i * 110, 0, 14, PREVIEW_H, (Color) { 40, 24, 14, 200 });
+        DrawCircle(PREVIEW_W / 2, PREVIEW_H / 2, 46, (Color) { 180, 130, 70, 255 });
+        DrawCircle(PREVIEW_W / 2, PREVIEW_H / 2, 40, (Color) { 30, 20, 14, 255 });
+        for (int i = 0; i < 12; i++)
+        {
+            float a = 2.0f * PI * i / 12.0f;
+            DrawLineEx(
+                (Vector2) {
+                PREVIEW_W / 2.0f + cosf(a) * 30, PREVIEW_H / 2.0f + sinf(a) * 30
+            },
+                (Vector2) {
+                PREVIEW_W / 2.0f + cosf(a) * 38, PREVIEW_H / 2.0f + sinf(a) * 38
+            },
+                2, (Color) { 220, 190, 130, 255 });
+        }
+        break;
+    default:
+        DrawRectangleGradientV(0, 0, PREVIEW_W, PREVIEW_H,
+            (Color) {
+            150, 200, 240, 255
+        }, (Color) { 225, 240, 250, 255 });
+        break;
+    }
+}
+
 static void BakeLevelPreview(int index)
 {
     BuildLevel(index);
@@ -1789,7 +1889,7 @@ static void BakeLevelPreview(int index)
     SetTextureFilter(levelPreviews[index].texture, TEXTURE_FILTER_BILINEAR);
 
     BeginTextureMode(levelPreviews[index]);
-    DrawRectangleGradientV(0, 0, PREVIEW_W, PREVIEW_H, (Color) { 150, 200, 240, 255 }, (Color) { 225, 240, 250, 255 });
+    DrawPreviewBackdrop(index);
 
     for (int i = 0; i < solidCount; i++)
     {
@@ -1812,10 +1912,15 @@ static void BakeLevelPreview(int index)
         Rectangle r = spikes[i];
         float w = fmaxf(r.width * sx, 3.0f);
         Vector2 base = { PV_X(r.x), PV_Y(r.y + r.height) };
+        // Bright halo + solid fill so spikes read even on dark previews
+        DrawTriangle((Vector2) { base.x - 1, base.y + 1 }, (Vector2) { base.x + w * 0.5f, base.y - 6.0f },
+            (Vector2) {
+            base.x + w + 1, base.y + 1
+        }, (Color) { 255, 220, 120, 220 });
         DrawTriangle((Vector2) { base.x, base.y }, (Vector2) { base.x + w * 0.5f, base.y - 4.0f },
             (Vector2) {
             base.x + w, base.y
-        }, (Color) { 190, 40, 40, 255 });
+        }, (Color) { 200, 40, 40, 255 });
     }
     for (int i = 0; i < enemyCount; i++)
         DrawCircleV((Vector2) { PV_X(enemies[i].pos.x), PV_Y(enemies[i].pos.y) - 2.0f }, 2.4f, (Color) { 130, 40, 150, 255 });
@@ -2196,14 +2301,7 @@ static void DrawTrailGhosts(void)
 
 //------------------------------------------------------------------------------------
 // Backgrounds
-//
-// bgTime advances continuously so clouds and smoke always drift. Each theme
-// has its own palette, gradient, and parallax props.
 //------------------------------------------------------------------------------------
-
-// ---------------------------------------------------------------------------
-// Level 1 - meadow: warm sky, green hills, slow puffy clouds
-// ---------------------------------------------------------------------------
 static void DrawBgDefault(Camera2D camera, float t)
 {
     DrawRectangleGradientV(0, 0, SCREEN_W, SCREEN_H,
@@ -2211,10 +2309,8 @@ static void DrawBgDefault(Camera2D camera, float t)
         150, 200, 240, 255
     }, (Color) { 225, 240, 250, 255 });
 
-    // Sun
     DrawCircleV((Vector2) { 180.0f - camera.target.x * 0.02f, 130.0f }, 46.0f, (Color) { 255, 245, 210, 220 });
 
-    // Far hills
     float p1 = camera.target.x * 0.15f;
     Color hillFar = (Color){ 170, 200, 175, 255 };
     for (int i = -1; i < 6; i++)
@@ -2223,7 +2319,6 @@ static void DrawBgDefault(Camera2D camera, float t)
         DrawCircle((int)bx + 150, SCREEN_H - 40, 220, hillFar);
     }
 
-    // Near hills
     float p2 = camera.target.x * 0.35f;
     Color hillNear = (Color){ 140, 185, 150, 255 };
     for (int i = -1; i < 6; i++)
@@ -2232,7 +2327,6 @@ static void DrawBgDefault(Camera2D camera, float t)
         DrawCircle((int)bx + 120, SCREEN_H + 10, 170, hillNear);
     }
 
-    // Drifting clouds - bgTime pushes them slowly left so the sky feels alive
     float p3 = camera.target.x * 0.08f + t * 12.0f;
     for (int i = -1; i < 5; i++)
     {
@@ -2245,9 +2339,6 @@ static void DrawBgDefault(Camera2D camera, float t)
     }
 }
 
-// ---------------------------------------------------------------------------
-// Level 2 - cavern: dark red rock, silhouetted pillars, rising embers
-// ---------------------------------------------------------------------------
 static void DrawBgCavern(Camera2D camera, float t)
 {
     DrawRectangleGradientV(0, 0, SCREEN_W, SCREEN_H,
@@ -2255,7 +2346,6 @@ static void DrawBgCavern(Camera2D camera, float t)
         32, 14, 18, 255
     }, (Color) { 92, 38, 30, 255 });
 
-    // Lava glow at the bottom of the screen, pulsing slowly
     float pulse = 0.85f + 0.15f * sinf(t * 0.8f);
     for (int r = 260; r > 0; r -= 20)
     {
@@ -2264,7 +2354,6 @@ static void DrawBgCavern(Camera2D camera, float t)
             (float)r, (Color) { 255, 120, 40, a });
     }
 
-    // Far stalactites/stalagmites (slow parallax)
     float p1 = camera.target.x * 0.12f;
     Color spireFar = (Color){ 52,  22,  22, 220 };
     for (int i = -1; i < 8; i++)
@@ -2289,7 +2378,6 @@ static void DrawBgCavern(Camera2D camera, float t)
             spireFar);
     }
 
-    // Near stalactites (faster parallax, darker)
     float p2 = camera.target.x * 0.24f;
     Color spireNear = (Color){ 24,  10,  12, 240 };
     for (int i = -1; i < 7; i++)
@@ -2306,7 +2394,6 @@ static void DrawBgCavern(Camera2D camera, float t)
             spireNear);
     }
 
-    // Slow-rising ember particles
     for (int i = 0; i < 34; i++)
     {
         float seed = (float)i * 41.7f;
@@ -2318,17 +2405,13 @@ static void DrawBgCavern(Camera2D camera, float t)
     }
 }
 
-// ---------------------------------------------------------------------------
-// Level 3 - sky islands: deep blue gradient, layered clouds, city skyline
-// with FIXED building heights (baked once, not re-rolled per frame).
-// ---------------------------------------------------------------------------
 #define CITY_MAX_BUILDINGS 40
 typedef struct {
     float x;
     float w;
     float h;
     float parallax;
-    unsigned char shade;   // 0..255, used for tint
+    unsigned char shade;
     bool  antenna;
 } CityBuilding;
 
@@ -2341,8 +2424,6 @@ static void BakeCityBuildings(void)
     cityBuildingCount = 0;
     unsigned int seed = 0xC0FFEEu;
 
-    // Two layers: far (parallax 0.10) and near (parallax 0.20). Both are
-    // baked once so the skyline stays rock-steady as the camera moves.
     for (int layer = 0; layer < 2; layer++)
     {
         float parallax = (layer == 0) ? 0.10f : 0.20f;
@@ -2383,7 +2464,6 @@ static void DrawBgSky(Camera2D camera, float t)
         90, 160, 230, 255
     }, (Color) { 215, 235, 250, 255 });
 
-    // Sun disc
     {
         Vector2 sun = { 200.0f - camera.target.x * 0.03f, 140.0f };
         for (int r = 120; r > 0; r -= 12)
@@ -2394,13 +2474,11 @@ static void DrawBgSky(Camera2D camera, float t)
         DrawCircleV(sun, 42.0f, (Color) { 255, 250, 225, 235 });
     }
 
-    // Baked skyline (fixed heights). Only the horizontal offset changes with
-    // the camera; buildings never jitter or re-randomise.
     for (int i = 0; i < cityBuildingCount; i++)
     {
         CityBuilding* b = &cityBuildings[i];
         float screenX = b->x - camera.target.x * b->parallax;
-        float wrapW = 4000.0f;   // enough to cover the widest level
+        float wrapW = 4000.0f;
         screenX = fmodf(screenX, wrapW);
         if (screenX < -400.0f) screenX += wrapW;
         if (screenX > SCREEN_W + 400.0f) continue;
@@ -2414,7 +2492,6 @@ static void DrawBgSky(Camera2D camera, float t)
                 (int)(SCREEN_H - b->h - 20), 4, 20, c);
     }
 
-    // Drifting cloud layers - three depths, all advancing with bgTime
     float pC1 = camera.target.x * 0.05f + t * 6.0f;
     for (int i = -1; i < 6; i++)
     {
@@ -2451,9 +2528,6 @@ static void DrawBgSky(Camera2D camera, float t)
     }
 }
 
-// ---------------------------------------------------------------------------
-// Level 4 - dusk city: warm orange sky, silhouetted skyline, distant windows
-// ---------------------------------------------------------------------------
 static void DrawBgCity(Camera2D camera, float t)
 {
     if (!cityBaked) BakeCityBuildings();
@@ -2463,7 +2537,6 @@ static void DrawBgCity(Camera2D camera, float t)
         60, 40, 90, 255
     }, (Color) { 240, 150, 90, 255 });
 
-    // Setting sun low on the horizon
     {
         Vector2 sun = { SCREEN_W * 0.7f - camera.target.x * 0.02f, SCREEN_H - 120.0f };
         for (int r = 200; r > 0; r -= 14)
@@ -2474,8 +2547,6 @@ static void DrawBgCity(Camera2D camera, float t)
         DrawCircleV(sun, 70.0f, (Color) { 255, 220, 160, 230 });
     }
 
-    // Baked skyline - same buildings as level 3, but tinted for dusk and
-    // with lit windows scattered across their faces.
     for (int i = 0; i < cityBuildingCount; i++)
     {
         CityBuilding* b = &cityBuildings[i];
@@ -2491,7 +2562,6 @@ static void DrawBgCity(Camera2D camera, float t)
             DrawRectangle((int)(screenX + b->w * 0.5f - 2),
                 (int)(SCREEN_H - b->h - 20), 4, 20, c);
 
-        // Scattered lit windows - deterministic so they don't flicker
         int winCols = (int)(b->w / 16.0f);
         int winRows = (int)(b->h / 22.0f);
         for (int wy = 0; wy < winRows; wy++)
@@ -2499,7 +2569,7 @@ static void DrawBgCity(Camera2D camera, float t)
             for (int wx = 0; wx < winCols; wx++)
             {
                 unsigned int h = (unsigned int)(i * 131 + wx * 17 + wy * 7);
-                if ((h & 3) == 0)   // ~25% of slots lit
+                if ((h & 3) == 0)
                 {
                     float px = screenX + 6.0f + wx * 16.0f;
                     float py = SCREEN_H - b->h + 8.0f + wy * 22.0f;
@@ -2514,7 +2584,6 @@ static void DrawBgCity(Camera2D camera, float t)
         }
     }
 
-    // Thin smoke layer drifting across the horizon
     float pS = camera.target.x * 0.08f + t * 22.0f;
     for (int i = -1; i < 6; i++)
     {
@@ -2527,9 +2596,6 @@ static void DrawBgCity(Camera2D camera, float t)
     }
 }
 
-// ---------------------------------------------------------------------------
-// Level 5 - clocktower interior: brass rings, faceless clock, dust motes
-// ---------------------------------------------------------------------------
 static void DrawGearRing(Vector2 center, float radius, float thickness,
     int teeth, float toothLen, float rot, Color color)
 {
@@ -2559,7 +2625,6 @@ static void DrawBgTower(Camera2D camera, float t)
         118, 78, 42, 255
     });
 
-    // Vertical pillars
     float pPillar = camera.target.x * 0.10f;
     Color pillar = (Color){ 40,  24,  14, 220 };
     Color pillarLit = (Color){ 150, 100,  50, 180 };
@@ -2572,7 +2637,6 @@ static void DrawBgTower(Camera2D camera, float t)
             DrawCircle((int)bx + 17, y, 2.2f, (Color) { 200, 150, 80, 160 });
     }
 
-    // Faceless clock face
     Vector2 clockCenter = {
         SCREEN_W * 0.5f - (camera.target.x - worldWidth * 0.5f) * 0.06f,
         SCREEN_H * 0.48f - (camera.target.y - (worldTopY + worldBottomY) * 0.5f) * 0.06f
@@ -2683,8 +2747,13 @@ static void DrawLevelCard(Rectangle rect, int number, const char* name, float be
     int nw = MeasureText(num, 56);
     DrawText(num, (int)(r.x + r.width * 0.5f - nw * 0.5f), (int)(r.y + 12), 56, border);
 
-    int lw = MeasureText(name, 24);
-    DrawText(name, (int)(r.x + r.width * 0.5f - lw * 0.5f), (int)(r.y + 74), 24, border);
+    // Title bar with a dark backing so it reads over both light sky previews
+    // and the dark cavern / tower previews.
+    const char* titleBar = name;
+    int lw = MeasureText(titleBar, 24);
+    DrawRectangle((int)(r.x + r.width * 0.5f - lw * 0.5f) - 6, (int)(r.y + 74) - 2,
+        lw + 12, 28, Fade(BLACK, 0.35f));
+    DrawText(titleBar, (int)(r.x + r.width * 0.5f - lw * 0.5f), (int)(r.y + 74), 24, RAYWHITE);
 
     Rectangle pv = { r.x + 16, r.y + 108, r.width - 32, (r.width - 32) * PREVIEW_H / PREVIEW_W };
     DrawTexturePro(preview, (Rectangle) { 0, 0, (float)preview.width, -(float)preview.height }, pv,
@@ -2737,7 +2806,7 @@ static void DrawSolid(Solid* s)
     }
 
     DrawRectangleRec(s->rect, c);
-    DrawRectangleLinesEx(s->rect, 2, (Color) { 30, 30, 30, 255 });
+    DrawRectangleLinesEx(s->rect, 2, (Color) { 20, 20, 20, 255 });
 
     if (s->type == SOLID_GROUND)
     {
@@ -2806,35 +2875,50 @@ static void DrawSolid(Solid* s)
     }
 }
 
-// Spikes: always opaque, with a bright highlight on top so they stay visible
-// against any background (especially the brass clock face).
+// Spikes: high-visibility hazard drawn in three layers.
+//  - Bright cream/yellow halo silhouette (larger, always opaque)
+//  - Opaque deep-red body with a warm gradient toward the tip
+//  - Bright tip dot so the lethal point is obvious at a glance
 static void DrawSpike(Rectangle r)
 {
     int teeth = (int)(r.width / 20);
     if (teeth < 1) teeth = 1;
     float tw = r.width / teeth;
+
     for (int i = 0; i < teeth; i++)
     {
         Vector2 p1 = { r.x + i * tw,           r.y + r.height };
         Vector2 p2 = { r.x + (i + 0.5f) * tw,  r.y };
         Vector2 p3 = { r.x + (i + 1) * tw,     r.y + r.height };
 
-        // Solid body
-        DrawTriangle(p1, p2, p3, (Color) { 190, 40, 40, 255 });
+        // Layer 1: bright halo behind the blade (offset outwards ~3px)
+        Vector2 h1 = { p1.x - 3.0f, p1.y + 2.0f };
+        Vector2 h2 = { p2.x,        p2.y - 4.0f };
+        Vector2 h3 = { p3.x + 3.0f, p3.y + 2.0f };
+        DrawTriangle(h1, h2, h3, (Color) { 255, 240, 180, 255 });
 
-        // Bright bevel on the left face for depth
-        Vector2 mid = { (p1.x + p2.x) * 0.5f, (p1.y + p2.y) * 0.5f };
-        Vector2 midBase = { (p1.x + p3.x) * 0.5f, p1.y };
-        DrawTriangle(p1, mid, midBase, (Color) { 230, 90, 90, 255 });
+        // Layer 2: dark outline silhouette
+        Vector2 o1 = { p1.x - 1.5f, p1.y + 1.0f };
+        Vector2 o2 = { p2.x,        p2.y - 2.0f };
+        Vector2 o3 = { p3.x + 1.5f, p3.y + 1.0f };
+        DrawTriangle(o1, o2, o3, (Color) { 40, 4, 4, 255 });
 
-        // Dark outline (always visible, never transparent)
-        DrawTriangleLines(p1, p2, p3, (Color) { 60, 6, 6, 255 });
+        // Layer 3: main solid body (deep red)
+        DrawTriangle(p1, p2, p3, (Color) { 190, 30, 30, 255 });
 
-        // Bright tip highlight
-        DrawCircleV(p2, 2.0f, (Color) { 255, 210, 210, 255 });
+        // Warm gradient on the inner face (toward the tip)
+        Vector2 midL = { (p1.x + p2.x) * 0.5f, (p1.y + p2.y) * 0.5f };
+        Vector2 baseMid = { (p1.x + p3.x) * 0.5f, p1.y };
+        DrawTriangle(p1, midL, baseMid, (Color) { 250, 100, 60, 255 });
+
+        // Bright tip dot, so the point reads instantly
+        DrawCircleV(p2, 2.2f, (Color) { 255, 250, 210, 255 });
+        DrawCircleV(p2, 1.0f, (Color) { 255, 255, 255, 255 });
     }
 }
 
+// Dotted aim line: dark under-dot + bright over-dot for visibility on
+// light and dark backgrounds alike.
 static void DrawDottedLine(Vector2 a, Vector2 b, float time, Color color)
 {
     const float spacing = 16.0f;
@@ -2842,11 +2926,17 @@ static void DrawDottedLine(Vector2 a, Vector2 b, float time, Color color)
     if (dist < 1.0f) return;
     Vector2 dir = Vector2Scale(Vector2Subtract(b, a), 1.0f / dist);
     for (float d = fmodf(time * 40.0f, spacing); d < dist; d += spacing)
-        DrawCircleV(Vector2Add(a, Vector2Scale(dir, d)), 2.5f, color);
+    {
+        Vector2 p = Vector2Add(a, Vector2Scale(dir, d));
+        DrawCircleV(p, 4.0f, (Color) { 0, 0, 0, 160 });
+        DrawCircleV(p, 2.5f, color);
+    }
 }
 
 static void DrawAnchor(Vector2 a, bool inRange)
 {
+    // Dark backing ring so anchors read on any background
+    DrawCircleV(a, 15, (Color) { 0, 0, 0, 180 });
     Color c = inRange ? (Color) { 70, 220, 255, 255 } : (Color) { 90, 110, 170, 255 };
     DrawCircleV(a, 12, (Color) { 25, 35, 65, 255 });
     DrawRing(a, 9, 12, 0, 360, 24, c);
@@ -2864,8 +2954,11 @@ static void DrawCoin(Coin* c, float t)
     float bobY = sinf(t * 3.0f + c->bob) * 5.0f;
     float squish = 0.55f + 0.45f * fabsf(cosf(t * 2.2f + c->bob));
     Vector2 pos = { c->pos.x, c->pos.y + bobY };
+    // Dark halo makes the coin readable on light sky and white cloud backgrounds
+    DrawEllipse((int)pos.x, (int)pos.y, 12.0f * squish, 12.0f, (Color) { 60, 40, 0, 200 });
     DrawEllipse((int)pos.x, (int)pos.y, 10.0f * squish, 10.0f, (Color) { 255, 215, 60, 255 });
     DrawEllipseLines((int)pos.x, (int)pos.y, 10.0f * squish, 10.0f, (Color) { 160, 120, 20, 255 });
+    DrawEllipse((int)(pos.x - 2 * squish), (int)(pos.y - 3), 3.0f * squish, 3.0f, (Color) { 255, 250, 210, 220 });
 }
 
 static void DrawPlayer(Player* p)
@@ -2877,11 +2970,16 @@ static void DrawPlayer(Player* p)
     float h = PLAYER_H * p->scale.y;
     Rectangle draw = { center.x - w * 0.5f, center.y + PLAYER_H * 0.5f - h, w, h };
 
+    // Dark outline behind the body so the player reads on light and dark bgs
+    Rectangle outline = { draw.x - 2, draw.y - 2, draw.width + 4, draw.height + 4 };
+    DrawRectangleRec(outline, (Color) { 0, 0, 0, 200 });
+
     Color body = p->grappling ? (Color) { 220, 130, 60, 255 } : (Color) { 200, 60, 60, 255 };
     DrawRectangleRec(draw, body);
-    DrawRectangleLinesEx(draw, 2, (Color) { 60, 10, 10, 255 });
+    DrawRectangleLinesEx(draw, 2, (Color) { 30, 5, 5, 255 });
 
     float eyeX = draw.x + draw.width * 0.5f + p->facing * 8.0f;
+    DrawCircle((int)eyeX, (int)(draw.y + draw.height * 0.32f), 4, BLACK);
     DrawCircle((int)eyeX, (int)(draw.y + draw.height * 0.32f), 3, WHITE);
 
     float speed = fabsf(p->velocity.x);
@@ -2895,6 +2993,27 @@ static void DrawPlayer(Player* p)
                 Fade(WHITE, a / 255.0f));
         }
     }
+}
+
+// High-visibility grapple rope. Drawn as a bright yellow core with a thick
+// dark outline so it stands out on every background (green hills, dark cave,
+// bright sky, dusk city, brass tower).
+static void DrawRope(Vector2 from, Vector2 to)
+{
+    DrawLineEx(from, to, 6.0f, (Color) { 0, 0, 0, 220 });        // outline
+    DrawLineEx(from, to, 4.0f, (Color) { 60, 40, 10, 255 });     // inner dark
+    DrawLineEx(from, to, 2.6f, (Color) { 255, 220, 90, 255 });   // bright core
+    DrawLineEx(from, to, 1.0f, (Color) { 255, 255, 230, 255 });  // white highlight
+
+    // Anchor end cap
+    DrawCircleV(to, 6.0f, (Color) { 0, 0, 0, 220 });
+    DrawCircleV(to, 4.5f, (Color) { 255, 220, 90, 255 });
+    DrawCircleV(to, 2.0f, (Color) { 255, 255, 230, 255 });
+
+    // Player end cap
+    DrawCircleV(from, 5.0f, (Color) { 0, 0, 0, 220 });
+    DrawCircleV(from, 3.5f, (Color) { 255, 220, 90, 255 });
+    DrawCircleV(from, 1.5f, (Color) { 255, 255, 230, 255 });
 }
 
 static void DrawEditorGrid(Camera2D camera)
@@ -3614,7 +3733,7 @@ int main(void)
 
         if (player.grappling)
         {
-            DrawLineEx(PlayerCenter(&player), player.grappleAnchor, 2.5f, (Color) { 40, 40, 40, 255 });
+            DrawRope(PlayerCenter(&player), player.grappleAnchor);
         }
         else
         {
