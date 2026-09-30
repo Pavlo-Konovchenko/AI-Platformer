@@ -48,6 +48,7 @@
 #define MAX_ENEMIES 60
 #define MAX_PARTICLES 300
 #define LEVEL_COUNT 4
+#define CUSTOM_LEVEL_INDEX (-1)   // sentinel currentLevel value for the user-made level
 
 //------------------------------------------------------------------------------------
 // Speed-feel / visual filters
@@ -60,7 +61,13 @@
 #define MOTION_TRAIL_COUNT   6
 #define MAX_STREAKS          80
 
-typedef enum { STATE_MENU, STATE_LEVEL_SELECT, STATE_PLAYING } GameState;
+typedef enum { STATE_MENU, STATE_LEVEL_SELECT, STATE_PLAYING, STATE_EDITOR } GameState;
+
+typedef enum {
+    TOOL_GROUND, TOOL_FLOATING, TOOL_WALL, TOOL_SPIKE, TOOL_ANCHOR,
+    TOOL_COIN, TOOL_ENEMY, TOOL_GOAL, TOOL_SPAWN
+} EditorTool;
+#define NUM_EDITOR_TOOLS 9
 
 typedef enum { SOLID_GROUND, SOLID_FLOATING, SOLID_WALL } SolidType;
 
@@ -172,6 +179,26 @@ static float bestTimes[LEVEL_COUNT] = { -1.0f, -1.0f, -1.0f, -1.0f };
 static int currentLevel = 0;
 static const char *levelNames[LEVEL_COUNT] = { "Momentum Run", "Spike Alley", "Sky Islands", "Twin Lanes" };
 
+//------------------------------------------------------------------------------------
+// Level editor state
+//------------------------------------------------------------------------------------
+#define EDITOR_GRID        20.0f
+#define EDITOR_PICK_RADIUS 26.0f
+#define CUSTOM_LEVEL_FILE  "custom_level.txt"
+
+static EditorTool editorTool = TOOL_GROUND;
+static Vector2 editorCamTarget = { 400.0f, 500.0f };
+static float   editorZoom = 1.0f;
+static bool    editorDragging = false;
+static Vector2 editorDragStart = { 0 };
+static char    editorStatusMsg[80] = "";
+static float   editorStatusTimer = 0.0f;
+
+static const char *editorToolLabels[NUM_EDITOR_TOOLS] = {
+    "GROUND", "FLOAT", "WALL", "SPIKE", "ANCHOR", "COIN", "ENEMY", "GOAL", "SPAWN"
+};
+
+
 // Sounds (generated procedurally, no external assets needed)
 static Sound sndJump, sndDoubleJump, sndLand, sndGrapple, sndWallBounce, sndCoin, sndWin, sndDeath;
 static bool audioReady = false;
@@ -218,6 +245,168 @@ static void AddEnemy(float x, float groundY, float minX, float maxX, float speed
     enemyCount++;
 }
 
+static void EditorStatus(const char *msg)
+{
+    snprintf(editorStatusMsg, sizeof(editorStatusMsg), "%s", msg);
+    editorStatusTimer = 2.2f;
+}
+
+static float EditorSnap(float v) { return roundf(v / EDITOR_GRID) * EDITOR_GRID; }
+
+// Keeps the gameplay camera clamp sane no matter what the user builds, by
+// fitting worldWidth/worldTopY/worldBottomY around whatever currently exists.
+static void RecalcCustomWorldBounds(void)
+{
+    float minX = spawnPoint.x, maxX = spawnPoint.x + 200.0f;
+    float minY = spawnPoint.y - 300.0f, maxY = spawnPoint.y + 300.0f;
+
+    #define EXPAND(px, py) do { \
+        if ((px) < minX) minX = (px); if ((px) > maxX) maxX = (px); \
+        if ((py) < minY) minY = (py); if ((py) > maxY) maxY = (py); \
+    } while (0)
+
+    EXPAND(goalRect.x, goalRect.y);
+    EXPAND(goalRect.x + goalRect.width, goalRect.y + goalRect.height);
+    for (int i = 0; i < solidCount; i++)
+    {
+        EXPAND(solids[i].rect.x, solids[i].rect.y);
+        EXPAND(solids[i].rect.x + solids[i].rect.width, solids[i].rect.y + solids[i].rect.height);
+    }
+    for (int i = 0; i < spikeCount; i++)
+    {
+        EXPAND(spikes[i].x, spikes[i].y);
+        EXPAND(spikes[i].x + spikes[i].width, spikes[i].y + spikes[i].height);
+    }
+    for (int i = 0; i < anchorCount; i++) EXPAND(anchors[i].x, anchors[i].y);
+    for (int i = 0; i < coinCount; i++) EXPAND(coins[i].pos.x, coins[i].pos.y);
+    for (int i = 0; i < enemyCount; i++) EXPAND(enemies[i].pos.x, enemies[i].pos.y);
+    #undef EXPAND
+
+    worldWidth = maxX + 400.0f;
+    worldTopY = minY - 300.0f;
+    worldBottomY = maxY + 300.0f;
+}
+
+// A blank starting point: enough ground to stand on plus a goal in the
+// distance, so a fresh level is immediately playable instead of a void.
+static void ResetCustomLevelScaffold(void)
+{
+    solidCount = spikeCount = anchorCount = coinCount = enemyCount = 0;
+    AddSolid(0, 650, 600, 100, SOLID_GROUND);
+    spawnPoint = (Vector2){ 60, 650 - PLAYER_H };
+    goalRect = (Rectangle){ 2000, 580, 40, 70 };
+    RecalcCustomWorldBounds();
+}
+
+static bool TryEraseNear(Vector2 world)
+{
+    for (int i = solidCount - 1; i >= 0; i--)
+        if (CheckCollisionPointRec(world, solids[i].rect)) { solids[i] = solids[--solidCount]; return true; }
+    for (int i = spikeCount - 1; i >= 0; i--)
+        if (CheckCollisionPointRec(world, spikes[i])) { spikes[i] = spikes[--spikeCount]; return true; }
+    for (int i = anchorCount - 1; i >= 0; i--)
+        if (Vector2Distance(world, anchors[i]) < EDITOR_PICK_RADIUS) { anchors[i] = anchors[--anchorCount]; return true; }
+    for (int i = coinCount - 1; i >= 0; i--)
+        if (Vector2Distance(world, coins[i].pos) < EDITOR_PICK_RADIUS) { coins[i] = coins[--coinCount]; return true; }
+    for (int i = enemyCount - 1; i >= 0; i--)
+        if (Vector2Distance(world, enemies[i].pos) < EDITOR_PICK_RADIUS * 1.3f) { enemies[i] = enemies[--enemyCount]; return true; }
+    return false;
+}
+
+static void SaveCustomLevel(void)
+{
+    FILE *f = fopen(CUSTOM_LEVEL_FILE, "w");
+    if (!f) { EditorStatus("Save failed (couldn't open file)"); return; }
+
+    fprintf(f, "CUSTOMLEVEL 1\n");
+    fprintf(f, "SPAWN %f %f\n", spawnPoint.x, spawnPoint.y);
+    fprintf(f, "GOAL %f %f %f %f\n", goalRect.x, goalRect.y, goalRect.width, goalRect.height);
+    fprintf(f, "SOLIDS %d\n", solidCount);
+    for (int i = 0; i < solidCount; i++)
+        fprintf(f, "%f %f %f %f %d\n", solids[i].rect.x, solids[i].rect.y,
+                solids[i].rect.width, solids[i].rect.height, (int)solids[i].type);
+    fprintf(f, "SPIKES %d\n", spikeCount);
+    for (int i = 0; i < spikeCount; i++)
+        fprintf(f, "%f %f %f %f\n", spikes[i].x, spikes[i].y, spikes[i].width, spikes[i].height);
+    fprintf(f, "ANCHORS %d\n", anchorCount);
+    for (int i = 0; i < anchorCount; i++)
+        fprintf(f, "%f %f\n", anchors[i].x, anchors[i].y);
+    fprintf(f, "COINS %d\n", coinCount);
+    for (int i = 0; i < coinCount; i++)
+        fprintf(f, "%f %f\n", coins[i].pos.x, coins[i].pos.y);
+    fprintf(f, "ENEMIES %d\n", enemyCount);
+    for (int i = 0; i < enemyCount; i++)
+        fprintf(f, "%f %f %f %f %f\n", enemies[i].pos.x, enemies[i].pos.y,
+                enemies[i].minX, enemies[i].maxX, enemies[i].speed);
+
+    fclose(f);
+    EditorStatus("Saved!");
+}
+
+// Returns true if a level file was found and loaded. On failure the current
+// arrays are left untouched (caller decides what to fall back to).
+static bool LoadCustomLevel(void)
+{
+    FILE *f = fopen(CUSTOM_LEVEL_FILE, "r");
+    if (!f) return false;
+
+    char tag[32];
+    int version = 0;
+    if (fscanf(f, "%31s %d", tag, &version) != 2 || strcmp(tag, "CUSTOMLEVEL") != 0)
+    {
+        fclose(f);
+        return false;
+    }
+
+    solidCount = spikeCount = anchorCount = coinCount = enemyCount = 0;
+
+    float sx, sy, gx, gy, gw, gh;
+    fscanf(f, "%31s %f %f", tag, &sx, &sy);
+    spawnPoint = (Vector2){ sx, sy };
+    fscanf(f, "%31s %f %f %f %f", tag, &gx, &gy, &gw, &gh);
+    goalRect = (Rectangle){ gx, gy, gw, gh };
+
+    int n = 0;
+    fscanf(f, "%31s %d", tag, &n);
+    for (int i = 0; i < n; i++)
+    {
+        float x, y, w, h; int type;
+        if (fscanf(f, "%f %f %f %f %d", &x, &y, &w, &h, &type) != 5) break;
+        AddSolid(x, y, w, h, (SolidType)type);
+    }
+    fscanf(f, "%31s %d", tag, &n);
+    for (int i = 0; i < n; i++)
+    {
+        float x, y, w, h;
+        if (fscanf(f, "%f %f %f %f", &x, &y, &w, &h) != 4) break;
+        AddSpike(x, y, w, h);
+    }
+    fscanf(f, "%31s %d", tag, &n);
+    for (int i = 0; i < n; i++)
+    {
+        float x, y;
+        if (fscanf(f, "%f %f", &x, &y) != 2) break;
+        AddAnchor(x, y);
+    }
+    fscanf(f, "%31s %d", tag, &n);
+    for (int i = 0; i < n; i++)
+    {
+        float x, y;
+        if (fscanf(f, "%f %f", &x, &y) != 2) break;
+        AddCoin(x, y);
+    }
+    fscanf(f, "%31s %d", tag, &n);
+    for (int i = 0; i < n; i++)
+    {
+        float x, y, minX, maxX, speed;
+        if (fscanf(f, "%f %f %f %f %f", &x, &y, &minX, &maxX, &speed) != 5) break;
+        AddEnemy(x, y, minX, maxX, speed);
+    }
+
+    fclose(f);
+    RecalcCustomWorldBounds();
+    return true;
+}
 static void UpdateEnemies(float dt)
 {
     for (int i = 0; i < enemyCount; i++)
@@ -1066,6 +1255,14 @@ static void BuildLevel4(void)
 
 static void BuildLevel(int index)
 {
+    if (index == CUSTOM_LEVEL_INDEX)
+    {
+        // The user's level lives entirely in the shared solids/spikes/anchors/
+        // coins/enemies arrays already, built by the editor. There is nothing
+        // to (re)generate, and doing so would erase what they made every time
+        // they die or press R while playtesting it.
+        return;
+    }
     solidCount = spikeCount = anchorCount = coinCount = enemyCount = 0;
     switch (index)
     {
@@ -1981,6 +2178,268 @@ static void DrawPlayer(Player* p)
 }
 
 //------------------------------------------------------------------------------------
+// Level editor
+//------------------------------------------------------------------------------------
+static void DrawEditorGrid(Camera2D camera)
+{
+    Vector2 topLeft = GetScreenToWorld2D((Vector2) { 0, 0 }, camera);
+    Vector2 bottomRight = GetScreenToWorld2D((Vector2) { SCREEN_W, SCREEN_H }, camera);
+    float step = EDITOR_GRID * 4.0f;
+    float startX = floorf(topLeft.x / step) * step;
+    float startY = floorf(topLeft.y / step) * step;
+    Color gridColor = (Color) { 255, 255, 255, 35 };
+
+    for (float x = startX; x < bottomRight.x; x += step)
+        DrawLine((int)x, (int)topLeft.y, (int)x, (int)bottomRight.y, gridColor);
+    for (float y = startY; y < bottomRight.y; y += step)
+        DrawLine((int)topLeft.x, (int)y, (int)bottomRight.x, (int)y, gridColor);
+}
+
+static void DrawEditorMarkers(void)
+{
+    DrawRectangleRec(goalRect, (Color) { 230, 230, 230, 255 });
+    DrawRectangleLinesEx(goalRect, 2, (Color) { 40, 40, 60, 255 });
+    DrawText("GOAL", (int)goalRect.x - 4, (int)goalRect.y - 22, 16, (Color) { 255, 230, 120, 255 });
+
+    Rectangle sr = { spawnPoint.x, spawnPoint.y, PLAYER_W, PLAYER_H };
+    DrawRectangleLinesEx(sr, 2, (Color) { 80, 220, 120, 255 });
+    DrawText("SPAWN", (int)sr.x - 8, (int)sr.y - 22, 16, (Color) { 120, 255, 160, 255 });
+}
+
+// Rectangle-shaped tools (ground/floating/wall/spike) support click-drag to
+// size the shape, or a plain click for a sensible default size.
+static void EditorPlaceRect(EditorTool tool, Vector2 a, Vector2 b)
+{
+    float x0 = fminf(a.x, b.x), y0 = fminf(a.y, b.y);
+    float w = fabsf(b.x - a.x), h = fabsf(b.y - a.y);
+    bool isClick = (w < 12.0f && h < 12.0f);
+
+    switch (tool)
+    {
+        case TOOL_GROUND:
+            if (isClick) { w = 160.0f; h = 100.0f; }
+            if (w < EDITOR_GRID) w = EDITOR_GRID;
+            if (h < EDITOR_GRID) h = EDITOR_GRID;
+            AddSolid(x0, y0, w, h, SOLID_GROUND);
+            break;
+        case TOOL_FLOATING:
+            if (isClick) { w = 160.0f; h = 30.0f; }
+            if (w < EDITOR_GRID) w = EDITOR_GRID;
+            if (h < 12.0f) h = 12.0f;
+            AddSolid(x0, y0, w, h, SOLID_FLOATING);
+            break;
+        case TOOL_WALL:
+            if (isClick) { w = 30.0f; h = 110.0f; }
+            if (w < 12.0f) w = 12.0f;
+            if (h < EDITOR_GRID) h = EDITOR_GRID;
+            AddSolid(x0, y0, w, h, SOLID_WALL);
+            break;
+        case TOOL_SPIKE:
+            if (isClick) { w = 90.0f; h = 20.0f; }
+            if (w < 20.0f) w = 20.0f;
+            if (h < 10.0f) h = 10.0f;
+            AddSpike(x0, y0, w, h);
+            break;
+        default: break;
+    }
+    RecalcCustomWorldBounds();
+}
+
+// Enemy placement: drag sets the patrol range along the ground you clicked on.
+static void EditorPlaceEnemy(Vector2 a, Vector2 b)
+{
+    float minX = fminf(a.x, b.x), maxX = fmaxf(a.x, b.x);
+    if (maxX - minX < 20.0f) { minX = a.x - 100.0f; maxX = a.x + 100.0f; }
+    AddEnemy((minX + maxX) * 0.5f, a.y, minX, maxX, 90.0f);
+    RecalcCustomWorldBounds();
+}
+
+// Drives the whole "Level Creator" screen: free camera, a tool palette, and
+// direct click/drag placement using the exact same Add* calls (and the same
+// draw functions) the built-in levels use, so a custom level is made from
+// literally the same assets as everything else in the game.
+static void RunEditor(Camera2D *camera, GameState *state, Player *player, bool *won, float dt)
+{
+    float panSpeed = 600.0f / editorZoom;
+    if (IsKeyDown(KEY_RIGHT) || IsKeyDown(KEY_D)) editorCamTarget.x += panSpeed * dt;
+    if (IsKeyDown(KEY_LEFT) || IsKeyDown(KEY_A)) editorCamTarget.x -= panSpeed * dt;
+    if (IsKeyDown(KEY_DOWN) || IsKeyDown(KEY_S)) editorCamTarget.y += panSpeed * dt;
+    if (IsKeyDown(KEY_UP) || IsKeyDown(KEY_W)) editorCamTarget.y -= panSpeed * dt;
+    float wheel = GetMouseWheelMove();
+    if (wheel != 0.0f) editorZoom = Clamp(editorZoom + wheel * 0.1f, 0.35f, 2.0f);
+
+    camera->target = editorCamTarget;
+    camera->zoom = editorZoom;
+    camera->offset = (Vector2) { SCREEN_W / 2.0f, SCREEN_H / 2.0f };
+
+    // ---- Toolbar layout ----
+    const int n = NUM_EDITOR_TOOLS;
+    float btnW = 128.0f, btnH = 44.0f, gap = 6.0f;
+    float totalW = n * btnW + (n - 1) * gap;
+    float startX = (SCREEN_W - totalW) * 0.5f;
+    Rectangle toolButtons[NUM_EDITOR_TOOLS];
+    for (int i = 0; i < n; i++)
+        toolButtons[i] = (Rectangle) { startX + i * (btnW + gap), 12, btnW, btnH };
+
+    const char *actionLabels[5] = { "SAVE", "LOAD", "CLEAR", "PLAY (P)", "BACK" };
+    float aBtnW = 170.0f, aBtnH = 44.0f, aGap = 10.0f;
+    float aTotalW = 5 * aBtnW + 4 * aGap;
+    float aStartX = (SCREEN_W - aTotalW) * 0.5f;
+    Rectangle actionButtons[5];
+    for (int i = 0; i < 5; i++)
+        actionButtons[i] = (Rectangle) { aStartX + i * (aBtnW + aGap), 64, aBtnW, aBtnH };
+
+    Vector2 mouse = GetMousePosition();
+    Rectangle uiPanel = { 0, 0, SCREEN_W, 118 };
+    bool overUI = CheckCollisionPointRec(mouse, uiPanel);
+
+    for (int i = 0; i < n; i++)
+        if (IsButtonClicked(toolButtons[i])) { editorTool = (EditorTool)i; Snd(sndCoin); }
+    for (int i = 0; i < n; i++)
+        if (IsKeyPressed(KEY_ONE + i)) editorTool = (EditorTool)i;
+
+    if (IsButtonClicked(actionButtons[0])) SaveCustomLevel();
+    if (IsButtonClicked(actionButtons[1]))
+        EditorStatus(LoadCustomLevel() ? "Loaded!" : "No saved level found");
+    if (IsButtonClicked(actionButtons[2]))
+    {
+        ResetCustomLevelScaffold();
+        EditorStatus("Cleared");
+    }
+    if (IsButtonClicked(actionButtons[3]) || IsKeyPressed(KEY_P))
+    {
+        Snd(sndGrapple);
+        StartLevel(CUSTOM_LEVEL_INDEX, player);
+        *won = false;
+        *state = STATE_PLAYING;
+    }
+    if (IsButtonClicked(actionButtons[4]) || IsKeyPressed(KEY_ESCAPE))
+    {
+        *state = STATE_LEVEL_SELECT;
+    }
+
+    Vector2 worldMouse = GetScreenToWorld2D(mouse, *camera);
+    Vector2 snapped = { EditorSnap(worldMouse.x), EditorSnap(worldMouse.y) };
+
+    if (!overUI)
+    {
+        if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT))
+        {
+            if (editorTool == TOOL_ANCHOR)
+            {
+                AddAnchor(snapped.x, snapped.y);
+                RecalcCustomWorldBounds();
+                SpawnBurst(snapped, 8, 120.0f, 0.3f, 3.0f, (Color) { 250, 210, 60, 255 });
+            }
+            else if (editorTool == TOOL_COIN)
+            {
+                AddCoin(snapped.x, snapped.y);
+                RecalcCustomWorldBounds();
+                SpawnBurst(snapped, 8, 120.0f, 0.3f, 3.0f, (Color) { 255, 215, 60, 255 });
+            }
+            else if (editorTool == TOOL_GOAL)
+            {
+                goalRect = (Rectangle) { snapped.x - 20, snapped.y - 70, 40, 70 };
+                RecalcCustomWorldBounds();
+            }
+            else if (editorTool == TOOL_SPAWN)
+            {
+                spawnPoint = (Vector2) { snapped.x - PLAYER_W * 0.5f, snapped.y - PLAYER_H };
+                RecalcCustomWorldBounds();
+            }
+            else
+            {
+                editorDragging = true;
+                editorDragStart = snapped;
+            }
+        }
+        if (IsMouseButtonReleased(MOUSE_BUTTON_LEFT) && editorDragging)
+        {
+            editorDragging = false;
+            if (editorTool == TOOL_ENEMY) EditorPlaceEnemy(editorDragStart, snapped);
+            else EditorPlaceRect(editorTool, editorDragStart, snapped);
+            Snd(sndLand);
+            SpawnBurst(snapped, 10, 140.0f, 0.35f, 3.0f, (Color) { 200, 200, 220, 255 });
+        }
+        if (IsMouseButtonPressed(MOUSE_BUTTON_RIGHT))
+        {
+            if (TryEraseNear(worldMouse))
+            {
+                RecalcCustomWorldBounds();
+                Snd(sndWallBounce);
+                SpawnBurst(worldMouse, 10, 150.0f, 0.3f, 3.0f, (Color) { 220, 80, 80, 255 });
+            }
+        }
+    }
+    else if (IsMouseButtonReleased(MOUSE_BUTTON_LEFT))
+    {
+        editorDragging = false; // released over the toolbar mid-drag: cancel it
+    }
+
+    if (editorStatusTimer > 0.0f) editorStatusTimer -= dt;
+    UpdateParticles(dt);
+
+    // ---- Draw ----
+    BeginDrawing();
+    ClearBackground((Color) { 190, 220, 245, 255 });
+    DrawParallaxBackground(*camera);
+
+    BeginMode2D(*camera);
+    DrawEditorGrid(*camera);
+    for (int i = 0; i < solidCount; i++) DrawSolid(&solids[i]);
+    for (int i = 0; i < spikeCount; i++) DrawSpike(spikes[i]);
+    DrawEnemies((float)GetTime());
+    for (int i = 0; i < coinCount; i++) DrawCoin(&coins[i], (float)GetTime());
+    for (int i = 0; i < anchorCount; i++) DrawAnchor(anchors[i], false);
+    DrawEditorMarkers();
+
+    if (editorDragging)
+    {
+        Rectangle preview = {
+            fminf(editorDragStart.x, snapped.x), fminf(editorDragStart.y, snapped.y),
+            fabsf(snapped.x - editorDragStart.x), fabsf(snapped.y - editorDragStart.y)
+        };
+        DrawRectangleRec(preview, Fade(SKYBLUE, 0.35f));
+        DrawRectangleLinesEx(preview, 2, SKYBLUE);
+    }
+    if (!overUI) DrawCircleV(snapped, 4, Fade(WHITE, 0.8f));
+
+    DrawParticles();
+    EndMode2D();
+
+    // ---- Toolbar ----
+    DrawRectangle(0, 0, SCREEN_W, 118, Fade(BLACK, 0.45f));
+    for (int i = 0; i < n; i++)
+    {
+        DrawButton(toolButtons[i], editorToolLabels[i], 16);
+        if ((int)editorTool == i)
+            DrawRectangleLinesEx((Rectangle) { toolButtons[i].x - 3, toolButtons[i].y - 3,
+                                  toolButtons[i].width + 6, toolButtons[i].height + 6 },
+                                  3, (Color) { 255, 230, 120, 255 });
+    }
+    for (int i = 0; i < 5; i++) DrawButton(actionButtons[i], actionLabels[i], 16);
+
+    const char *hint = "Left-click/drag: place    Right-click: erase    WASD/Arrows: pan    Wheel: zoom    1-9: tools";
+    int hw = MeasureText(hint, 16);
+    DrawText(hint, SCREEN_W / 2 - hw / 2, 120, 16, (Color) { 230, 230, 235, 255 });
+
+    if (editorStatusTimer > 0.0f)
+    {
+        unsigned char a = (unsigned char)(255 * Clamp(editorStatusTimer / 2.2f, 0.0f, 1.0f));
+        int sw = MeasureText(editorStatusMsg, 20);
+        DrawText(editorStatusMsg, SCREEN_W / 2 - sw / 2, 144, 20, (Color) { 255, 255, 255, a });
+    }
+
+    char counts[160];
+    snprintf(counts, sizeof(counts), "Solids %d/%d   Spikes %d/%d   Anchors %d/%d   Coins %d/%d   Enemies %d/%d",
+             solidCount, MAX_SOLIDS, spikeCount, MAX_SPIKES, anchorCount, MAX_ANCHORS,
+             coinCount, MAX_COINS, enemyCount, MAX_ENEMIES);
+    DrawText(counts, 12, SCREEN_H - 26, 16, (Color) { 230, 230, 235, 255 });
+
+    EndDrawing();
+}
+
+//------------------------------------------------------------------------------------
 // Main
 //------------------------------------------------------------------------------------
 int main(void)
@@ -2015,9 +2474,11 @@ int main(void)
     Rectangle levelCards[LEVEL_COUNT];
     for (int i = 0; i < LEVEL_COUNT; i++)
         levelCards[i] = (Rectangle){ cardsX + i * (cardW + cardGap), SCREEN_H / 2.0f - 90, cardW, cardH };
-    Rectangle backButton = { SCREEN_W / 2.0f - 110, SCREEN_H / 2.0f + 160, 220, 56 };
+    Rectangle backButton = { SCREEN_W / 2.0f - 340, SCREEN_H / 2.0f + 160, 220, 56 };
+    Rectangle createButton = { SCREEN_W / 2.0f - 100, SCREEN_H / 2.0f + 160, 220, 56 };
     int hoveredCardPrev = -1;
     bool backHoveredPrev = false;
+    bool createHoveredPrev = false;
 
     while (!WindowShouldClose() && !quitRequested)
     {
@@ -2091,9 +2552,12 @@ int main(void)
             for (int i = 0; i < LEVEL_COUNT; i++)
                 if (CheckCollisionPointRec(GetMousePosition(), levelCards[i])) hoveredCard = i;
             bool backHovered = CheckCollisionPointRec(GetMousePosition(), backButton);
-            if ((hoveredCard >= 0 && hoveredCard != hoveredCardPrev) || (backHovered && !backHoveredPrev)) Snd(sndCoin);
+            bool createHovered = CheckCollisionPointRec(GetMousePosition(), createButton);
+            if ((hoveredCard >= 0 && hoveredCard != hoveredCardPrev) || (backHovered && !backHoveredPrev)
+                || (createHovered && !createHoveredPrev)) Snd(sndCoin);
             hoveredCardPrev = hoveredCard;
             backHoveredPrev = backHovered;
+            createHoveredPrev = createHovered;
 
             int chosen = -1;
             if (hoveredCard >= 0 && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) chosen = hoveredCard;
@@ -2106,6 +2570,16 @@ int main(void)
                 StartLevel(chosen, &player);
                 won = false;
                 state = STATE_PLAYING;
+            }
+            else if (IsButtonClicked(createButton))
+            {
+                Snd(sndGrapple);
+                if (!LoadCustomLevel()) ResetCustomLevelScaffold();
+                editorCamTarget = Vector2Add(spawnPoint, (Vector2) { 400.0f, -150.0f });
+                editorZoom = 1.0f;
+                editorDragging = false;
+                editorStatusTimer = 0.0f;
+                state = STATE_EDITOR;
             }
             else if (IsButtonClicked(backButton) || IsKeyPressed(KEY_ESCAPE))
             {
@@ -2131,9 +2605,10 @@ int main(void)
             for (int i = 0; i < LEVEL_COUNT; i++)
                 DrawLevelCard(levelCards[i], i + 1, levelNames[i], bestTimes[i], levelPreviews[i].texture);
             DrawButton(backButton, "BACK", 26);
+            DrawButton(createButton, "CREATE LEVEL", 20);
 
-            char hint[64];
-            snprintf(hint, sizeof(hint), "Click a level or press 1-%d    ESC: back", LEVEL_COUNT);
+            char hint[96];
+            snprintf(hint, sizeof(hint), "Click a level or press 1-%d    CREATE LEVEL: build your own    ESC: back", LEVEL_COUNT);
             int hw = MeasureText(hint, 16);
             DrawText(hint, SCREEN_W / 2 - hw / 2, SCREEN_H / 2 + 235, 16, (Color){ 230, 230, 235, 255 });
 
@@ -2142,12 +2617,19 @@ int main(void)
             continue;
         }
 
+        if (state == STATE_EDITOR)
+        {
+            RunEditor(&camera, &state, &player, &won, dt);
+            continue;
+        }
+
         if (IsKeyPressed(KEY_ESCAPE))
         {
-            // Leave the level back to the level select screen. Falls through
-            // so this frame still finishes its EndDrawing (which polls input);
-            // skipping it would leave ESC "pressed" for the next screen.
-            state = STATE_LEVEL_SELECT;
+            // Leave the level back to the level select screen (or, if this was
+            // a playtest of the user's own level, back to the editor). Falls
+            // through so this frame still finishes its EndDrawing (which polls
+            // input); skipping it would leave ESC "pressed" for the next screen.
+            state = (currentLevel == CUSTOM_LEVEL_INDEX) ? STATE_EDITOR : STATE_LEVEL_SELECT;
             hoveredCardPrev = -1;
         }
 
@@ -2312,7 +2794,8 @@ int main(void)
                 Snd(sndWin);
                 Shake(10.0f, 0.3f);
                 SpawnBurst(PlayerCenter(&player), 40, 260.0f, 0.8f, 4.5f, (Color) { 255, 220, 90, 255 });
-                if (bestTimes[currentLevel] < 0.0f || levelTime < bestTimes[currentLevel])
+                if (currentLevel != CUSTOM_LEVEL_INDEX &&
+                    (bestTimes[currentLevel] < 0.0f || levelTime < bestTimes[currentLevel]))
                 {
                     bestTimes[currentLevel] = levelTime;
                     SaveGhost(currentLevel); // new personal best: this run becomes the ghost
@@ -2448,7 +2931,7 @@ int main(void)
         }
 
         DrawParticles();
-        DrawGhost(currentLevel, levelTime);
+        if (currentLevel != CUSTOM_LEVEL_INDEX) DrawGhost(currentLevel, levelTime);
         DrawPlayer(&player);
 
         EndMode2D();
@@ -2545,7 +3028,7 @@ int main(void)
             // "SPEED" label on the side
             DrawText("SPEED", (int)(barX - 56), (int)(barY - 4), 14, Fade(WHITE, 0.6f));
         }
-        if (bestTimes[currentLevel] > 0.0f)
+        if (currentLevel != CUSTOM_LEVEL_INDEX && bestTimes[currentLevel] > 0.0f)
         {
             char best[64];
             snprintf(best, sizeof(best), "Best: %05.2fs", bestTimes[currentLevel]);
@@ -2555,7 +3038,9 @@ int main(void)
 
         if (won)
         {
-            const char* msg = "LEVEL COMPLETE!  R: replay   ESC: level select";
+            const char* msg = (currentLevel == CUSTOM_LEVEL_INDEX)
+                ? "LEVEL COMPLETE!  R: replay   ESC: back to editor"
+                : "LEVEL COMPLETE!  R: replay   ESC: level select";
             int w = MeasureText(msg, 40);
             DrawRectangle(SCREEN_W / 2 - w / 2 - 20, SCREEN_H / 2 - 50, w + 40, 100, Fade(BLACK, 0.6f));
             DrawText(msg, SCREEN_W / 2 - w / 2, SCREEN_H / 2 - 30, 40, (Color) { 250, 220, 80, 255 });
