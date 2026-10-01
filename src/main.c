@@ -2687,7 +2687,7 @@ static void DrawBgTower(Camera2D camera, float t)
     }
 }
 
-static void DrawBackground(Camera2D camera, float time)
+static void DrawBackgroundSharp(Camera2D camera, float time)
 {
     switch (currentBgTheme)
     {
@@ -2697,6 +2697,102 @@ static void DrawBackground(Camera2D camera, float time)
     case BG_TOWER:  DrawBgTower(camera, time);  break;
     default:        DrawBgDefault(camera, time); break;
     }
+}
+
+//------------------------------------------------------------------------------------
+// Background blur
+//
+// The themed background is drawn into an offscreen texture and then blitted to
+// the screen through a small blur shader. Everything drawn afterwards (solids,
+// spikes, player, HUD...) stays crisp, which makes the scene read as less busy.
+//------------------------------------------------------------------------------------
+// Blur strength in pixels. 0 = off, ~1.5 = very subtle, 2 = slight, 4+ = heavy.
+#define BG_BLUR_RADIUS 4.0f
+
+static RenderTexture2D bgTarget;
+static Shader          bgBlurShader;
+static bool            bgBlurReady = false;
+
+// 5x5 binomial (gaussian-like) blur. 'radius' scales the tap spacing so the
+// strength can be tuned without changing the tap count.
+static const char* bgBlurFragSrc =
+"#version 330\n"
+"in vec2 fragTexCoord;\n"
+"in vec4 fragColor;\n"
+"out vec4 finalColor;\n"
+"uniform sampler2D texture0;\n"
+"uniform vec4 colDiffuse;\n"
+"uniform vec2 texelSize;\n"
+"uniform float radius;\n"
+"void main()\n"
+"{\n"
+"    float w[5] = float[5](1.0, 4.0, 6.0, 4.0, 1.0);\n"
+"    vec4 sum = vec4(0.0);\n"
+"    float total = 0.0;\n"
+"    for (int y = -2; y <= 2; y++)\n"
+"    {\n"
+"        for (int x = -2; x <= 2; x++)\n"
+"        {\n"
+"            float wt = w[x + 2] * w[y + 2];\n"
+"            vec2 offset = vec2(float(x), float(y)) * texelSize * radius;\n"
+"            sum += texture(texture0, fragTexCoord + offset) * wt;\n"
+"            total += wt;\n"
+"        }\n"
+"    }\n"
+"    finalColor = (sum / total) * colDiffuse * fragColor;\n"
+"}\n";
+
+// Call once after InitWindow (needs a GL context).
+static void InitBackgroundBlur(void)
+{
+    bgTarget = LoadRenderTexture(SCREEN_W, SCREEN_H);
+    SetTextureFilter(bgTarget.texture, TEXTURE_FILTER_BILINEAR);
+
+    bgBlurShader = LoadShaderFromMemory(NULL, bgBlurFragSrc);
+    int texelLoc = GetShaderLocation(bgBlurShader, "texelSize");
+    int radiusLoc = GetShaderLocation(bgBlurShader, "radius");
+
+    // If the shader failed to compile (e.g. a GLES/web target that can't take
+    // #version 330), raylib silently substitutes its default shader, which has
+    // no "texelSize" uniform. In that case we just skip the blur.
+    bgBlurReady = (texelLoc >= 0 && radiusLoc >= 0);
+    if (!bgBlurReady) return;
+
+    float texel[2] = { 1.0f / (float)SCREEN_W, 1.0f / (float)SCREEN_H };
+    float radius = BG_BLUR_RADIUS;
+    SetShaderValue(bgBlurShader, texelLoc, texel, SHADER_UNIFORM_VEC2);
+    SetShaderValue(bgBlurShader, radiusLoc, &radius, SHADER_UNIFORM_FLOAT);
+}
+
+static void UnloadBackgroundBlur(void)
+{
+    UnloadRenderTexture(bgTarget);
+    UnloadShader(bgBlurShader);
+}
+
+static void DrawBackground(Camera2D camera, float time)
+{
+    if (!bgBlurReady || BG_BLUR_RADIUS <= 0.0f)
+    {
+        DrawBackgroundSharp(camera, time);
+        return;
+    }
+
+    BeginTextureMode(bgTarget);
+    ClearBackground(BLACK);
+    DrawBackgroundSharp(camera, time);
+    EndTextureMode();
+
+    BeginShaderMode(bgBlurShader);
+    // Render textures are stored upside-down, hence the negative height.
+    DrawTextureRec(bgTarget.texture,
+        (Rectangle) {
+        0, 0, (float)SCREEN_W, -(float)SCREEN_H
+    },
+        (Vector2) {
+        0, 0
+    }, WHITE);
+    EndShaderMode();
 }
 
 static bool IsButtonClicked(Rectangle rect)
@@ -3273,6 +3369,7 @@ int main(void)
     SetExitKey(KEY_NULL);
     SetTargetFPS(60);
     InitGameAudio();
+    InitBackgroundBlur();
 
     for (int i = 0; i < LEVEL_COUNT; i++) BakeLevelPreview(i);
 
@@ -3861,6 +3958,7 @@ int main(void)
     for (int i = 0; i < LEVEL_COUNT; i++) UnloadRenderTexture(levelPreviews[i]);
     for (int i = 0; i < LEVEL_COUNT; i++) free(ghostTracks[i].samples);
     free(recordingTrack.samples);
+    UnloadBackgroundBlur();
     ShutdownGameAudio();
     CloseWindow();
     return 0;
