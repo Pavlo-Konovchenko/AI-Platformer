@@ -1,5 +1,6 @@
 #include "raylib.h"
 #include "raymath.h"
+#include "rlgl.h"
 #include <math.h>
 #include <string.h>
 #include <stdlib.h>
@@ -3249,6 +3250,443 @@ static void DrawRope(Vector2 from, Vector2 to)
     DrawCircleV(from, 1.5f, (Color) { 255, 255, 230, 255 });
 }
 
+//------------------------------------------------------------------------------------
+// 2.5D view
+// Gameplay still happens on the 2D z=0 plane, but the world is drawn as real 3D
+// geometry through a perspective camera: platforms have depth, faces are shaded,
+// and the view swings slightly as you move so the depth reads. World (x, y)
+// maps to 3D (x, -y, z). Toggle with V; the 2D renderer is untouched.
+//------------------------------------------------------------------------------------
+static bool view3D = true;
+static float cam3dSway = 0.0f;
+static Camera3D cam3d;
+
+#define CAM3D_FOV   42.0f
+#define CAM3D_RISE  110.0f   // camera sits above the player so platform tops show
+
+static Vector3 W3(float x, float y, float z) { return (Vector3) { x, -y, z }; }
+
+static Camera3D BuildCamera3D(Camera2D cam2d, float sway)
+{
+    float zoom = fmaxf(cam2d.zoom, 0.2f);
+    // Distance at which the visible height at z=0 equals the 2D view's height.
+    float dist = (SCREEN_H / zoom * 0.5f) / tanf(CAM3D_FOV * 0.5f * DEG2RAD);
+    // The 2D camera's offset carries screen shake / speed jitter; carry it over.
+    Vector2 shake = Vector2Subtract(cam2d.offset, (Vector2) { SCREEN_W * 0.5f, SCREEN_H * 0.5f });
+
+    Camera3D c = { 0 };
+    c.target = (Vector3){ cam2d.target.x - shake.x / zoom, -cam2d.target.y + shake.y / zoom, 0.0f };
+    c.position = (Vector3){ c.target.x + sway, c.target.y + CAM3D_RISE, dist };
+    c.up = (Vector3){ 0.0f, 1.0f, 0.0f };
+    c.fovy = CAM3D_FOV;
+    c.projection = CAMERA_PERSPECTIVE;
+    return c;
+}
+
+static bool InView3D(float x0, float x1)
+{
+    float cx = cam3d.target.x;
+    return x1 > cx - 1500.0f && x0 < cx + 1500.0f;
+}
+
+static void Quad3D(Vector3 a, Vector3 b, Vector3 c, Vector3 d, Color col)
+{
+    DrawTriangle3D(a, b, c, col);
+    DrawTriangle3D(a, c, d, col);
+}
+
+// Box with per-face shading (light from the upper left), so depth reads even
+// without real lighting. Backface culling is disabled while this is used.
+static void DrawShadedBox(Vector3 mn, Vector3 mx, Color base, Color topColor)
+{
+    Color left = ColorBrightness(base, -0.20f);
+    Color right = ColorBrightness(base, -0.38f);
+    Color bottom = ColorBrightness(base, -0.55f);
+
+    Quad3D((Vector3) { mn.x, mn.y, mx.z }, (Vector3) { mx.x, mn.y, mx.z },
+        (Vector3) { mx.x, mx.y, mx.z }, (Vector3) { mn.x, mx.y, mx.z }, base);        // front
+    Quad3D((Vector3) { mn.x, mx.y, mn.z }, (Vector3) { mn.x, mx.y, mx.z },
+        (Vector3) { mx.x, mx.y, mx.z }, (Vector3) { mx.x, mx.y, mn.z }, topColor);    // top
+    Quad3D((Vector3) { mn.x, mn.y, mn.z }, (Vector3) { mx.x, mn.y, mn.z },
+        (Vector3) { mx.x, mn.y, mx.z }, (Vector3) { mn.x, mn.y, mx.z }, bottom);      // bottom
+    Quad3D((Vector3) { mn.x, mn.y, mn.z }, (Vector3) { mn.x, mn.y, mx.z },
+        (Vector3) { mn.x, mx.y, mx.z }, (Vector3) { mn.x, mx.y, mn.z }, left);        // left
+    Quad3D((Vector3) { mx.x, mn.y, mn.z }, (Vector3) { mx.x, mx.y, mn.z },
+        (Vector3) { mx.x, mx.y, mx.z }, (Vector3) { mx.x, mn.y, mx.z }, right);       // right
+}
+
+static void DrawBoxWires(Vector3 mn, Vector3 mx, Color col)
+{
+    DrawCubeWiresV(Vector3Scale(Vector3Add(mn, mx), 0.5f), Vector3Subtract(mx, mn), col);
+}
+
+static void SolidDepth(SolidType t, float* back, float* front)
+{
+    switch (t)
+    {
+    case SOLID_GROUND: *back = -90.0f; *front = 90.0f; break;
+    case SOLID_WALL:   *back = -60.0f; *front = 60.0f; break;
+    default:           *back = -45.0f; *front = 45.0f; break;
+    }
+}
+
+static void DrawSolid3D(Solid* s, float t)
+{
+    if (s->type == SOLID_BREAKABLE && s->broken) return;
+
+    float zb, zf;
+    SolidDepth(s->type, &zb, &zf);
+    Rectangle r = s->rect;
+    Vector3 mn = { r.x, -(r.y + r.height), zb };
+    Vector3 mx = { r.x + r.width, -r.y, zf };
+
+    Color c;
+    switch (s->type)
+    {
+    case SOLID_FLOATING:  c = currentPalette.floating; break;
+    case SOLID_WALL:      c = currentPalette.wall; break;
+    case SOLID_GROUND:    c = currentPalette.ground; break;
+    case SOLID_MOVING:    c = currentPalette.moving; break;
+    case SOLID_BREAKABLE: c = currentPalette.breakable; break;
+    case SOLID_PHASING:   c = currentPalette.phasing; break;
+    default:              c = GRAY; break;
+    }
+
+    if (s->type == SOLID_PHASING && s->phasedOut)
+    {
+        DrawBoxWires(mn, mx, Fade(c, 0.45f));
+        return;
+    }
+
+    Color top = (s->type == SOLID_GROUND) ? currentPalette.groundTop : ColorBrightness(c, 0.28f);
+    DrawShadedBox(mn, mx, c, top);
+    DrawBoxWires(mn, mx, (Color) { 15, 15, 20, 150 });
+
+    if (s->type == SOLID_BREAKABLE)
+    {
+        float k = (s->breakDelay > 0.0f) ? (s->breakTimer / s->breakDelay) : 0.0f;
+        if (k > 0.0f)
+        {
+            int numCracks = 1 + (int)(k * 4.0f);
+            for (int i = 0; i < numCracks; i++)
+            {
+                float fx = r.x + r.width * (0.15f + 0.18f * i);
+                DrawLine3D((Vector3) { fx, -r.y, zf + 0.4f },
+                    (Vector3) { fx + 6.0f, -(r.y + r.height), zf + 0.4f }, (Color) { 60, 30, 10, 220 });
+            }
+            if (k > 0.5f)
+            {
+                float pulse = 0.5f + 0.5f * sinf(t * 30.0f);
+                unsigned char a = (unsigned char)((k - 0.5f) * 2.0f * 130.0f * pulse);
+                Quad3D((Vector3) { mn.x, mn.y, zf + 0.6f }, (Vector3) { mx.x, mn.y, zf + 0.6f },
+                    (Vector3) { mx.x, mx.y, zf + 0.6f }, (Vector3) { mn.x, mx.y, zf + 0.6f },
+                    (Color) { 255, 60, 20, a });
+            }
+        }
+    }
+
+    if (s->type == SOLID_MOVING)
+    {
+        Vector2 pathEnd = Vector2Add(s->moveOrigin, s->moveVec);
+        for (int i = 0; i <= 12; i++)
+        {
+            Vector2 pp = Vector2Lerp(s->moveOrigin, pathEnd, i / 12.0f);
+            DrawSphereEx(W3(pp.x + r.width * 0.5f, pp.y + r.height * 0.5f, 0.0f), 1.8f, 3, 4,
+                Fade(currentPalette.moving, 0.5f));
+        }
+    }
+
+    if (s->type == SOLID_PHASING)
+    {
+        float cycle = s->phaseOnTime + s->phaseOffTime;
+        if (cycle > 0.0f)
+        {
+            float k = fmodf(s->phaseTimer + s->phaseOffset, cycle);
+            float glow = (k < s->phaseOnTime) ? (0.6f + 0.4f * sinf(t * 6.0f)) : 0.0f;
+            if (glow > 0.0f)
+                Quad3D((Vector3) { mn.x, mn.y, zf + 0.6f }, (Vector3) { mx.x, mn.y, zf + 0.6f },
+                    (Vector3) { mx.x, mx.y, zf + 0.6f }, (Vector3) { mn.x, mx.y, zf + 0.6f },
+                    Fade(WHITE, glow * 0.25f));
+        }
+    }
+}
+
+// Each spike tooth is a small pyramid, bright faces toward the light, with a
+// glowing tip and cream edge lines so the hazard stays obvious.
+static void DrawSpike3D(Rectangle r)
+{
+    int teeth = (int)(r.width / 20);
+    if (teeth < 1) teeth = 1;
+    float tw = r.width / teeth;
+    const float hd = 26.0f;
+    float yb = -(r.y + r.height), yt = -r.y;
+
+    for (int i = 0; i < teeth; i++)
+    {
+        float x0 = r.x + i * tw, x1 = x0 + tw, cx = (x0 + x1) * 0.5f;
+        Vector3 apex = { cx, yt, 0.0f };
+        Vector3 b0 = { x0, yb, -hd }, b1 = { x1, yb, -hd }, b2 = { x1, yb, hd }, b3 = { x0, yb, hd };
+
+        DrawTriangle3D(b3, b2, apex, (Color) { 225, 60, 45, 255 });   // front
+        DrawTriangle3D(b0, b3, apex, (Color) { 240, 110, 75, 255 });  // left (lit)
+        DrawTriangle3D(b2, b1, apex, (Color) { 140, 20, 20, 255 });   // right (shaded)
+        DrawTriangle3D(b1, b0, apex, (Color) { 100, 15, 15, 255 });   // back
+
+        Color edge = { 255, 240, 180, 255 };
+        DrawLine3D(b3, apex, edge);
+        DrawLine3D(b2, apex, edge);
+        DrawLine3D(b3, b2, edge);
+        DrawSphereEx(apex, 3.0f, 4, 5, (Color) { 255, 250, 210, 255 });
+    }
+}
+
+static void DrawEnemies3D(float t)
+{
+    for (int i = 0; i < enemyCount; i++)
+    {
+        Rectangle r = EnemyRect(&enemies[i]);
+        if (!InView3D(r.x, r.x + r.width)) continue;
+
+        float bob = sinf(t * 8.0f + i * 1.7f) * 2.0f;
+        Vector3 c = W3(r.x + r.width * 0.5f, r.y + r.height * 0.55f + bob, 0.0f);
+        float rad = ENEMY_W * 0.5f;
+
+        rlPushMatrix();
+        rlTranslatef(c.x, c.y, c.z);
+        rlScalef(1.0f, ENEMY_H / ENEMY_W, 1.0f);
+        DrawSphereEx((Vector3) { 0, 0, 0 }, rad, 10, 12, (Color) { 130, 40, 150, 255 });
+        rlPopMatrix();
+
+        for (int k = 0; k < 3; k++)
+        {
+            float sx = c.x + (k - 1) * 8.0f;
+            DrawCylinderEx((Vector3) { sx, c.y + 6.0f, 0.0f }, (Vector3) { sx, c.y + 17.0f, 0.0f },
+                4.0f, 0.0f, 6, (Color) { 170, 60, 200, 255 });
+        }
+
+        float ex = c.x + enemies[i].dir * 7.0f;
+        DrawSphereEx((Vector3) { ex, c.y + 1.0f, 13.5f }, 3.6f, 6, 8, WHITE);
+        DrawSphereEx((Vector3) { ex + enemies[i].dir * 0.8f, c.y + 1.0f, 16.6f }, 1.7f, 4, 6, BLACK);
+    }
+}
+
+static void DrawCoin3D(Coin* c, float t)
+{
+    if (c->collected) return;
+    if (!InView3D(c->pos.x - 20.0f, c->pos.x + 20.0f)) return;
+
+    float bobY = sinf(t * 3.0f + c->bob) * 5.0f;
+    float spin = fmodf(t * 140.0f + c->bob * 57.0f, 360.0f);
+
+    rlPushMatrix();
+    rlTranslatef(c->pos.x, -(c->pos.y + bobY), 0.0f);
+    rlRotatef(spin, 0.0f, 1.0f, 0.0f);
+    DrawCylinderEx((Vector3) { 0, 0, -4.5f }, (Vector3) { 0, 0, -3.6f }, 13.0f, 13.0f, 18, (Color) { 60, 40, 0, 200 });
+    DrawCylinderEx((Vector3) { 0, 0, -3.0f }, (Vector3) { 0, 0, 3.0f }, 11.0f, 11.0f, 18, (Color) { 255, 215, 60, 255 });
+    DrawCylinderEx((Vector3) { 0, 0, 3.0f }, (Vector3) { 0, 0, 3.4f }, 7.5f, 7.5f, 14, (Color) { 255, 244, 170, 255 });
+    rlPopMatrix();
+}
+
+// Hollow targeting disc (ring + core) with a crosshair, matching the 2D anchor look.
+static void DrawAnchor3D(Vector2 a, bool inRange)
+{
+    if (!InView3D(a.x - 20.0f, a.x + 20.0f)) return;
+    Vector3 p = W3(a.x, a.y, 0.0f);
+    Color c = inRange ? (Color) { 70, 220, 255, 255 } : (Color) { 90, 110, 170, 255 };
+
+    DrawCylinderEx((Vector3) { p.x, p.y, -2.0f }, (Vector3) { p.x, p.y, 2.0f }, 18.0f, 18.0f, 24, (Color) { 0, 0, 0, 180 });
+    DrawCylinderEx((Vector3) { p.x, p.y, -2.5f }, (Vector3) { p.x, p.y, 2.5f }, 15.5f, 15.5f, 24, c);
+    DrawCylinderEx((Vector3) { p.x, p.y, -2.6f }, (Vector3) { p.x, p.y, 2.6f }, 11.5f, 11.5f, 24, (Color) { 25, 35, 65, 255 });
+    DrawSphereEx(p, 5.0f, 6, 8, c);
+    DrawLine3D((Vector3) { p.x - 24, p.y, 3 }, (Vector3) { p.x - 10, p.y, 3 }, c);
+    DrawLine3D((Vector3) { p.x + 10, p.y, 3 }, (Vector3) { p.x + 24, p.y, 3 }, c);
+    DrawLine3D((Vector3) { p.x, p.y - 24, 3 }, (Vector3) { p.x, p.y - 10, 3 }, c);
+    DrawLine3D((Vector3) { p.x, p.y + 10, 3 }, (Vector3) { p.x, p.y + 24, 3 }, c);
+}
+
+static void DrawGoal3D(void)
+{
+    Rectangle g = goalRect;
+    Vector3 mn = { g.x, -(g.y + g.height), -14.0f }, mx = { g.x + g.width, -g.y, 14.0f };
+    DrawShadedBox(mn, mx, (Color) { 230, 230, 230, 255 }, WHITE);
+    DrawBoxWires(mn, mx, (Color) { 40, 40, 60, 200 });
+    DrawTriangle3D(W3(g.x + g.width, g.y, 0), W3(g.x + g.width, g.y + 22, 0),
+        W3(g.x + g.width + 34, g.y + 11, 0), (Color) { 60, 190, 90, 255 });
+}
+
+// Player box: squash & stretch applied, pivoting on the feet like the 2D draw.
+static void DrawPlayerBox3D(Vector2 pos, Vector2 scale, float facing, bool grappling, float alphaMul)
+{
+    float w = PLAYER_W * scale.x, h = PLAYER_H * scale.y;
+    float d = 34.0f * fminf(scale.x, 1.3f);
+    Rectangle draw = { pos.x + (PLAYER_W - w) * 0.5f, pos.y + (PLAYER_H - h), w, h };
+
+    Color body = grappling ? (Color) { 220, 130, 60, 255 } : (Color) { 200, 60, 60, 255 };
+    body.a = (unsigned char)(255.0f * alphaMul);
+    Vector3 mn = { draw.x, -(draw.y + h), -d * 0.5f }, mx = { draw.x + w, -draw.y, d * 0.5f };
+    DrawShadedBox(mn, mx, body, ColorBrightness(body, 0.3f));
+    if (alphaMul > 0.9f) DrawBoxWires(mn, mx, (Color) { 30, 5, 5, 220 });
+}
+
+static void DrawPlayer3D(Player* p)
+{
+    DrawPlayerBox3D(p->position, p->scale, p->facing, p->grappling, 1.0f);
+
+    float w = PLAYER_W * p->scale.x, h = PLAYER_H * p->scale.y;
+    float d = 34.0f * fminf(p->scale.x, 1.3f);
+    Vector2 center = PlayerCenter(p);
+    float top = center.y + PLAYER_H * 0.5f - h;
+    float ex = center.x + p->facing * 8.0f * (w / PLAYER_W);
+    float ey = top + h * 0.32f;
+    DrawSphereEx(W3(ex, ey, d * 0.5f), 4.4f, 6, 8, BLACK);
+    DrawSphereEx(W3(ex, ey, d * 0.5f + 1.0f), 3.2f, 6, 8, WHITE);
+    DrawSphereEx(W3(ex + p->facing * 0.8f, ey, d * 0.5f + 3.6f), 1.4f, 4, 6, BLACK);
+}
+
+// Soft contact shadow on the surface below the player; shrinks and fades with
+// height, and stays inside the supporting platform's edges.
+static void DrawPlayerShadow3D(Player* p)
+{
+    Rectangle pr = PlayerRect(p->position);
+    float feetY = pr.y + pr.height;
+    Solid* floor = NULL;
+    for (int i = 0; i < solidCount; i++)
+    {
+        Solid* s = &solids[i];
+        if (!IsSolidActive(s)) continue;
+        Rectangle r = s->rect;
+        if (r.x >= pr.x + pr.width || r.x + r.width <= pr.x) continue;
+        if (r.y < feetY - 2.0f) continue;
+        if (!floor || r.y < floor->rect.y) floor = s;
+    }
+    if (!floor) return;
+
+    float gap = floor->rect.y - feetY;
+    if (gap > 600.0f) return;
+    float k = 1.0f - gap / 600.0f;
+    float cx = pr.x + pr.width * 0.5f;
+    float rad = 17.0f * (0.55f + 0.45f * k);
+    rad = fminf(rad, fminf(cx - floor->rect.x, floor->rect.x + floor->rect.width - cx));
+    if (rad < 3.0f) return;
+
+    float y = -floor->rect.y + 0.6f;
+    DrawCylinderEx((Vector3) { cx, y, 0.0f }, (Vector3) { cx, y + 0.3f, 0.0f }, rad, rad, 20,
+        Fade(BLACK, 0.18f + 0.30f * k));
+}
+
+static void DrawTrailGhosts3D(void)
+{
+    for (int i = MOTION_TRAIL_COUNT - 1; i >= 0; i--)
+    {
+        if (trailGhosts[i].life <= 0.0f) continue;
+        DrawPlayerBox3D(trailGhosts[i].pos, trailGhosts[i].scale, trailGhosts[i].facing,
+            trailGhosts[i].grappling, 0.25f * trailGhosts[i].life);
+    }
+}
+
+static void DrawGhost3D(int level, float t)
+{
+    GhostSample s;
+    if (!GetGhostSample(level, t, &s)) return;
+
+    Color body = { 130, 210, 255, 110 };
+    if (s.grappling)
+        DrawCylinderEx(W3(s.pos.x + PLAYER_W * 0.5f, s.pos.y + PLAYER_H * 0.5f, 0.0f),
+            W3(s.anchor.x, s.anchor.y, 0.0f), 1.0f, 1.0f, 5, (Color) { 130, 210, 255, 90 });
+    Vector3 mn = { s.pos.x, -(s.pos.y + PLAYER_H), -17.0f }, mx = { s.pos.x + PLAYER_W, -s.pos.y, 17.0f };
+    DrawShadedBox(mn, mx, body, (Color) { 170, 230, 255, 130 });
+    DrawSphereEx(W3(s.pos.x + PLAYER_W * 0.5f + s.facing * 8.0f, s.pos.y + 14.0f, 17.0f), 3.0f, 4, 6,
+        (Color) { 255, 255, 255, 170 });
+}
+
+static void DrawRope3D(Vector2 from, Vector2 to)
+{
+    Vector3 a = W3(from.x, from.y, 0.0f), b = W3(to.x, to.y, 0.0f);
+    Vector3 off = { 0.0f, 0.0f, -2.5f };
+    // Dark band slightly behind the rope so it outlines it against any background.
+    DrawCylinderEx(Vector3Add(a, off), Vector3Add(b, off), 3.4f, 3.4f, 6, (Color) { 0, 0, 0, 220 });
+    DrawCylinderEx(a, b, 2.2f, 2.2f, 6, (Color) { 255, 220, 90, 255 });
+    DrawSphereEx(Vector3Add(b, off), 6.0f, 6, 8, (Color) { 0, 0, 0, 220 });
+    DrawSphereEx(b, 4.5f, 6, 8, (Color) { 255, 220, 90, 255 });
+    DrawSphereEx(a, 4.5f, 6, 8, (Color) { 255, 220, 90, 255 });
+}
+
+static void DrawAimLine3D(Vector2 from, Vector2 to, float time, Color color)
+{
+    const float spacing = 16.0f;
+    float dist = Vector2Distance(from, to);
+    if (dist < 1.0f) return;
+    Vector2 dir = Vector2Scale(Vector2Subtract(to, from), 1.0f / dist);
+    for (float d = fmodf(time * 40.0f, spacing); d < dist; d += spacing)
+    {
+        Vector2 p = Vector2Add(from, Vector2Scale(dir, d));
+        DrawSphereEx(W3(p.x, p.y, -2.0f), 4.0f, 4, 6, (Color) { 0, 0, 0, 160 });
+        DrawSphereEx(W3(p.x, p.y, 0.0f), 2.5f, 4, 6, color);
+    }
+}
+
+static void DrawParticles3D(void)
+{
+    for (int i = 0; i < MAX_PARTICLES; i++)
+    {
+        if (!particles[i].alive) continue;
+        float t = particles[i].life / particles[i].maxLife;
+        float rad = particles[i].size * t;
+        if (rad < 0.3f) continue;
+        Color c = particles[i].color;
+        c.a = (unsigned char)(255 * t);
+        DrawSphereEx(W3(particles[i].pos.x, particles[i].pos.y, 0.0f), rad, 3, 5, c);
+    }
+}
+
+// Whole 2.5D world pass. Backface culling is off so face winding doesn't matter;
+// it is restored after EndMode3D (which is what flushes the batch).
+static void DrawWorld3D(Player* player)
+{
+    rlSetClipPlanes(20.0, 8000.0);   // a tight near plane keeps coplanar edges from z-fighting
+    BeginMode3D(cam3d);
+    rlDisableBackfaceCulling();
+
+    for (int i = 0; i < solidCount; i++)
+        if (InView3D(solids[i].rect.x, solids[i].rect.x + solids[i].rect.width)) DrawSolid3D(&solids[i], levelTime);
+    for (int i = 0; i < spikeCount; i++)
+        if (InView3D(spikes[i].x, spikes[i].x + spikes[i].width)) DrawSpike3D(spikes[i]);
+    DrawEnemies3D(levelTime);
+    for (int i = 0; i < coinCount; i++) DrawCoin3D(&coins[i], levelTime);
+
+    Vector2 pc = PlayerCenter(player);
+    for (int i = 0; i < anchorCount; i++)
+        DrawAnchor3D(anchors[i], Vector2Distance(pc, anchors[i]) <= GRAPPLE_RANGE);
+    DrawGoal3D();
+
+    // Translucent figures (motion trail, PB ghost) must not write depth: otherwise
+    // a squashed/stretched trail box can sit in front of the player's faces and
+    // fade parts of him out. Depth *testing* stays on so solids still hide them.
+    // The batch is flushed around the state change since GL state is immediate.
+    rlDrawRenderBatchActive();
+    rlDisableDepthMask();
+    DrawTrailGhosts3D();
+    if (currentLevel != CUSTOM_LEVEL_INDEX) DrawGhost3D(currentLevel, levelTime);
+    rlDrawRenderBatchActive();
+    rlEnableDepthMask();
+
+    DrawPlayerShadow3D(player);
+
+    if (player->grappling)
+        DrawRope3D(pc, player->grappleAnchor);
+    else
+    {
+        int aimed = FindBestAnchor(player);
+        if (aimed >= 0) DrawAimLine3D(pc, anchors[aimed], (float)GetTime(), (Color) { 70, 220, 255, 220 });
+    }
+
+    DrawPlayer3D(player);
+    DrawParticles3D();
+
+    EndMode3D();
+    rlEnableBackfaceCulling();
+}
+
 static void DrawEditorGrid(Camera2D camera)
 {
     Vector2 topLeft = GetScreenToWorld2D((Vector2) { 0, 0 }, camera);
@@ -3689,6 +4127,8 @@ int main(void)
             hoveredCardPrev = -1;
         }
 
+        if (IsKeyPressed(KEY_V)) view3D = !view3D;
+
         if (IsKeyPressed(KEY_R))
         {
             StartLevel(currentLevel, &player);
@@ -3980,6 +4420,11 @@ int main(void)
         }
         camera.offset = camOffset;
 
+        // 2.5D camera: swing slightly toward the direction of travel so the side
+        // faces of platforms come into view as you move.
+        cam3dSway = Lerp(cam3dSway, Clamp(player.velocity.x * 0.10f, -80.0f, 80.0f), 1.0f - expf(-4.0f * dt));
+        cam3d = BuildCamera3D(camera, cam3dSway);
+
         if (speedIntensity > 0.1f)
         {
             int streakCount = (int)(speedIntensity * 4.0f);
@@ -3996,6 +4441,21 @@ int main(void)
 
         DrawBackground(camera, levelTime);
 
+        if (view3D)
+        {
+            DrawWorld3D(&player);
+
+            // The PB tag is screen-space text pinned to the ghost's projected position.
+            GhostSample pbSample;
+            if (currentLevel != CUSTOM_LEVEL_INDEX && GetGhostSample(currentLevel, levelTime, &pbSample))
+            {
+                Vector2 sp = GetWorldToScreen(W3(pbSample.pos.x + PLAYER_W * 0.5f, pbSample.pos.y - 14.0f, 0.0f), cam3d);
+                const char* tag = "PB";
+                DrawText(tag, (int)(sp.x - MeasureText(tag, 12) * 0.5f), (int)sp.y - 6, 12, (Color) { 130, 210, 255, 220 });
+            }
+        }
+        else
+        {
         BeginMode2D(camera);
 
         DrawTrailGhosts();
@@ -4040,6 +4500,7 @@ int main(void)
         DrawPlayer(&player);
 
         EndMode2D();
+        }
 
         DrawRadialSpeedLines(player.velocity, speedIntensity);
         DrawSpeedStreaks(camera);
@@ -4051,7 +4512,7 @@ int main(void)
             16, 8, 18, RAYWHITE);
         DrawText("While grappling -> W/S or Up/Down: reel in/out    R: restart    ESC: level select",
             16, 32, 18, RAYWHITE);
-        DrawText("Jump against a wall to wall-jump off it",
+        DrawText("Jump against a wall to wall-jump off it    V: switch 2D / 3D view",
             16, 56, 16, (Color) { 220, 220, 220, 255 });
 
         char hud[128];
