@@ -30,6 +30,14 @@
 #define DASH_DURATION     0.16f   // how long the burst lasts
 #define DASH_GRAVITY_MULT 0.15f   // gravity is mostly suspended during the burst
 
+// Wall-jump: a strong vertical + horizontal kick you get by pressing jump
+// while airborne and pressed against a wall. Refreshes the double jump and
+// the air dash so a single wall can be chained repeatedly.
+#define WALL_JUMP_VY        -700.0f
+#define WALL_JUMP_VX        360.0f
+#define WALL_JUMP_LOCKOUT   0.12f   // input lockout after firing, prevents sticky walls
+#define WALL_JUMP_GRACE     0.10f   // how long after leaving a wall a jump still counts as a wall-jump
+
 #define PLAYER_W 30.0f
 #define PLAYER_H 44.0f
 
@@ -112,6 +120,12 @@ typedef struct {
     float dashTimer;     // > 0 while a dash burst is active
     float dashDir;       // locked burst direction, set when the dash fires
     float dashSpeed;     // locked burst magnitude: max(DASH_SPEED, speed you already had)
+
+    // Wall-jump bookkeeping
+    float wallJumpLockTimer;   // while > 0, ignore horizontal input (so we shoot off cleanly)
+    float wallJumpGraceTimer;  // > 0 means a jump press still triggers a wall jump
+    float wallContactDir;      // -1 if wall is on the left, +1 if on the right, 0 if none
+
     Vector2 scale;
 
     Vector2 ropeDir;
@@ -1246,98 +1260,202 @@ static void BuildLevel4(void)
     spawnPoint = (Vector2){ 60, 650 - PLAYER_H };
 }
 
+//====================================================================================
+// Level 5: "Clockwork Spire"
+//
+// Vertical tower climb. NO grapple anchors anywhere. Beat it with the base
+// toolkit: run, jump, double jump, air dash, and wall jump. Every gap has
+// been sized so the maximum single hop is roughly:
+//     jump   ~135px up
+//     double ~110px up
+//     dash   ~90px  horizontal bonus
+//     wall   ~160px up + 360 horizontal (kick)
+// The two tall "spire" walls at the summit are the intended wall-jump
+// showcase: you can't reach the goal without at least one wall-jump.
+//====================================================================================
 static void BuildLevel5(void)
 {
+    // --- FLOOR 0: base camp (y=650) ---
     AddSolid(0, 650, 700, 100, SOLID_GROUND);
     AddCoin(180, 580);
     AddCoin(520, 580);
-    AddAnchor(400, 380);
-    AddSolid(720, 590, 130, 22, SOLID_FLOATING);
-    AddSolid(900, 520, 130, 22, SOLID_FLOATING);
-    AddCoin(810, 540);
-    AddCoin(965, 470);
-    AddMovingPlatform(1080, 470, 120, 22, 0, -260, 90.0f, 0.0f);
 
-    AddSolid(1280, 180, 220, 30, SOLID_FLOATING);
-    AddCoin(1390, 130);
-    AddBreakablePlatform(1540, 180, 90, 20, 0.45f);
-    AddBreakablePlatform(1670, 180, 90, 20, 0.45f);
-    AddBreakablePlatform(1800, 180, 90, 20, 0.45f);
-    AddCoin(1585, 130);
-    AddCoin(1715, 130);
-    AddCoin(1845, 130);
-    AddSolid(1940, 180, 40, 260, SOLID_WALL);
-    AddAnchor(1960, 60);
-    AddSolid(2040, 200, 240, 30, SOLID_FLOATING);
-    AddCoin(2160, 150);
+    // Small stone, then a taller stone, then the elevator.
+    AddSolid(760, 610, 130, 22, SOLID_FLOATING);
+    AddSolid(950, 550, 130, 22, SOLID_FLOATING);
+    AddCoin(825, 560);
+    AddCoin(1015, 500);
 
-    AddPhasingPlatform(2320, -120, 110, 22, 1.3f, 0.9f, 0.0f);
-    AddPhasingPlatform(2470, -160, 110, 22, 1.3f, 0.9f, 1.1f);
-    AddPhasingPlatform(2620, -120, 110, 22, 1.3f, 0.9f, 2.2f);
-    AddCoin(2375, -170);
-    AddCoin(2525, -210);
-    AddCoin(2675, -170);
-    AddSolid(2820, -180, 200, 30, SOLID_FLOATING);
-    AddCoin(2920, -230);
-    AddAnchor(2900, -360);
+    // Elevator up to floor 1 - slow and roomy so no hook is needed.
+    AddMovingPlatform(1120, 500, 130, 22, 0, -300, 80.0f, 0.0f);
 
-    AddBreakablePlatform(2840, -420, 90, 20, 0.40f);
-    AddBreakablePlatform(2700, -520, 90, 20, 0.40f);
-    AddBreakablePlatform(2560, -420, 90, 20, 0.40f);
-    AddBreakablePlatform(2420, -520, 90, 20, 0.40f);
-    AddBreakablePlatform(2280, -420, 90, 20, 0.40f);
-    AddCoin(2885, -470);
-    AddCoin(2745, -570);
-    AddCoin(2605, -470);
-    AddCoin(2465, -570);
-    AddCoin(2325, -470);
+    // --- FLOOR 1: first landing (y=200) ---
+    AddSolid(1330, 200, 240, 30, SOLID_FLOATING);
+    AddCoin(1450, 150);
 
-    AddSolid(2140, -620, 900, 30, SOLID_GROUND);
-    AddSpike(2500, -640, 80, 20);
-    AddSpike(2700, -640, 80, 20);
-    AddCoin(2400, -670);
-    AddCoin(2600, -670);
-    AddCoin(2800, -670);
-    AddAnchor(3040, -900);
-    AddSolid(3180, -800, 240, 30, SOLID_FLOATING);
-    AddCoin(3300, -850);
-    AddPhasingPlatform(3200, -720, 100, 22, 1.1f, 0.8f, 0.0f);
-    AddPhasingPlatform(3350, -660, 100, 22, 1.1f, 0.8f, 0.95f);
-    AddPhasingPlatform(3500, -720, 100, 22, 1.1f, 0.8f, 1.9f);
-    AddCoin(3250, -770);
-    AddCoin(3400, -710);
-    AddCoin(3550, -770);
+    // A SHORT WALL the player is meant to WALL-JUMP off. It's 300 tall so
+    // it's clearly a wall-jump moment, and the far side has a landing.
+    AddSolid(1600, 200 - 300, 36, 300, SOLID_WALL);   // wall sits x=1600..1636, y=-100..200
+    AddSolid(1680, 200, 220, 30, SOLID_FLOATING);
+    AddCoin(1790, 150);
 
-    AddMovingPlatform(3400, -1000, 140, 22, 0, -260, 110.0f, 0.0f);
-    AddBreakablePlatform(3250, -1080, 90, 20, 0.40f);
-    AddBreakablePlatform(3100, -1180, 90, 20, 0.40f);
-    AddBreakablePlatform(3250, -1280, 90, 20, 0.40f);
-    AddBreakablePlatform(3400, -1180, 90, 20, 0.40f);
-    AddCoin(3305, -1130);
-    AddCoin(3155, -1230);
-    AddCoin(3305, -1330);
-    AddCoin(3455, -1230);
-    AddAnchor(3560, -1080);
+    // Breakable bridge - two tiles only, generous 0.7s so one running jump
+    // + dash clears the whole span.
+    AddBreakablePlatform(1940, 180, 100, 20, 0.70f);
+    AddBreakablePlatform(2100, 180, 100, 20, 0.70f);
+    AddCoin(1990, 130);
+    AddCoin(2150, 130);
 
-    AddSolid(3560, -1480, 180, 30, SOLID_FLOATING);
-    AddCoin(3650, -1530);
-    AddMovingPlatform(3800, -1620, 120, 22, 180, -140, 95.0f, 0.0f);
-    AddCoin(3900, -1700);
-    AddSolid(4080, -1720, 180, 30, SOLID_FLOATING);
-    AddCoin(4170, -1770);
-    AddPhasingPlatform(4300, -1820, 110, 22, 1.4f, 0.9f, 0.0f);
-    AddCoin(4355, -1870);
+    // Landing at the far side of the breakables
+    AddSolid(2280, 160, 220, 30, SOLID_FLOATING);
+    AddCoin(2390, 110);
 
-    AddSolid(4480, -1900, 320, 30, SOLID_FLOATING);
-    AddSolid(4480, -2200, 30, 300, SOLID_WALL);
-    AddSolid(4770, -2200, 30, 300, SOLID_WALL);
-    AddAnchor(4620, -2150);
-    AddCoin(4620, -1970);
-    goalRect = (Rectangle){ 4600, -1970, 40, 70 };
+    // --- FLOOR 2: phasing gallery (y=-60) ---
+    // Four phasing tiles, evenly spaced, all reachable with a single hop.
+    AddPhasingPlatform(2520, -60, 110, 22, 1.4f, 0.9f, 0.00f);
+    AddPhasingPlatform(2670, -90, 110, 22, 1.4f, 0.9f, 0.80f);
+    AddPhasingPlatform(2820, -60, 110, 22, 1.4f, 0.9f, 1.60f);
+    AddPhasingPlatform(2970, -90, 110, 22, 1.4f, 0.9f, 2.40f);
+    AddCoin(2575, -110);
+    AddCoin(2725, -140);
+    AddCoin(2875, -110);
+    AddCoin(3025, -140);
+
+    // Exit ledge to the right of the gallery
+    AddSolid(3150, -80, 220, 30, SOLID_FLOATING);
+    AddCoin(3260, -130);
+
+    // --- FLOOR 3: breakable switchbacks (y=-260) ---
+    // Alternating solid / breakable with tighter spacing. Every breakable has
+    // a solid immediately adjacent so you never land on two in a row.
+    AddSolid(3360, -260, 100, 20, SOLID_FLOATING);
+    AddBreakablePlatform(3360, -360, 100, 20, 0.55f);
+    AddCoin(3410, -310);
+
+    AddSolid(3210, -400, 100, 20, SOLID_FLOATING);
+    AddBreakablePlatform(3210, -500, 100, 20, 0.55f);
+    AddCoin(3260, -450);
+
+    AddSolid(3360, -540, 100, 20, SOLID_FLOATING);
+    AddBreakablePlatform(3360, -640, 100, 20, 0.55f);
+    AddCoin(3410, -590);
+
+    AddSolid(3210, -700, 100, 20, SOLID_FLOATING);
+    AddBreakablePlatform(3210, -800, 100, 20, 0.55f);
+    AddCoin(3260, -750);
+
+    // Solid landing that tops the switchbacks
+    AddSolid(3020, -860, 240, 30, SOLID_FLOATING);
+    AddCoin(3140, -910);
+
+    // --- FLOOR 4: gear terrace (y=-980) ---
+    // Mid-tower landmark: a long elevated runway with two spike strips.
+    AddSolid(2140, -980, 900, 30, SOLID_GROUND);
+    AddSpike(2480, -1000, 80, 20);
+    AddSpike(2660, -1000, 80, 20);
+    AddCoin(2350, -1030);
+    AddCoin(2580, -1030);
+    AddCoin(2800, -1030);
+
+    // Elevator + horizontal shuttle to the upper area. Both slow enough
+    // that you're never asked to time a jump off a fast mover.
+    AddMovingPlatform(3040, -1050, 130, 22, 0, -180, 85.0f, 0.00f);
+    AddMovingPlatform(3040, -1280, 130, 22, 180, 0, 90.0f, 0.30f);
+
+    // Landing platform at the top of the elevator ride
+    AddSolid(3340, -1180, 220, 30, SOLID_FLOATING);
+    AddCoin(3450, -1230);
+
+    // Alternate bypass up the right: a chain of phasing tiles with tight
+    // spacing so it reads as a real route instead of a hook shot.
+    AddPhasingPlatform(3420, -1080, 100, 22, 1.1f, 0.8f, 0.00f);
+    AddPhasingPlatform(3570, -1010, 100, 22, 1.1f, 0.8f, 0.60f);
+    AddPhasingPlatform(3720, -1080, 100, 22, 1.1f, 0.8f, 1.20f);
+    AddCoin(3470, -1130);
+    AddCoin(3620, -1060);
+    AddCoin(3770, -1130);
+
+    // --- FLOOR 5: upper breakable spiral (y=-1340) ---
+    // Central elevator plus four evenly spaced breakables, each with a
+    // solid foothold beside it.
+    AddMovingPlatform(3520, -1360, 140, 22, 0, -260, 105.0f, 0.0f);
+
+    AddSolid(3340, -1400, 110, 20, SOLID_FLOATING);
+    AddBreakablePlatform(3340, -1490, 110, 20, 0.55f);
+    AddCoin(3395, -1445);
+
+    AddSolid(3170, -1540, 110, 20, SOLID_FLOATING);
+    AddBreakablePlatform(3170, -1630, 110, 20, 0.55f);
+    AddCoin(3225, -1585);
+
+    AddSolid(3340, -1680, 110, 20, SOLID_FLOATING);
+    AddBreakablePlatform(3340, -1770, 110, 20, 0.55f);
+    AddCoin(3395, -1725);
+
+    AddSolid(3520, -1820, 110, 20, SOLID_FLOATING);
+    AddBreakablePlatform(3520, -1910, 110, 20, 0.55f);
+    AddCoin(3575, -1865);
+
+    // Solid landing that closes the spiral
+    AddSolid(3680, -1980, 220, 30, SOLID_FLOATING);
+    AddCoin(3790, -2030);
+
+    // --- FLOOR 6: summit approach (y=-2100) ---
+    // Simple ascending chain of floating platforms. One moving platform
+    // bridges the widest gap.
+    AddSolid(3940, -2100, 180, 30, SOLID_FLOATING);
+    AddCoin(4030, -2150);
+
+    AddMovingPlatform(4160, -2180, 130, 22, 0, -140, 90.0f, 0.0f);
+    AddCoin(4225, -2260);
+
+    AddSolid(4340, -2320, 180, 30, SOLID_FLOATING);
+    AddCoin(4430, -2370);
+
+    AddPhasingPlatform(4560, -2380, 110, 22, 1.4f, 0.9f, 0.0f);
+    AddCoin(4615, -2430);
+
+    // Solid landing right before the summit wall-jump section
+    AddSolid(4700, -2440, 220, 30, SOLID_FLOATING);
+
+    // --- SUMMIT: the wall-jump finale ---
+    // A tall pair of walls with a series of small ledges between them.
+    // The ONLY way up is to wall-jump: bounce between the left and right
+    // walls while drifting upward, then land on the top ledge.
+    //
+    // Left wall runs from y=-3200 to y=-2440 (760 tall).
+    // Right wall runs from y=-3200 to y=-2440 (760 tall).
+    // Five small ledges are carved into each wall face as rest points.
+    AddSolid(4980, -3200, 40, 760, SOLID_WALL);   // LEFT wall
+    AddSolid(5320, -3200, 40, 760, SOLID_WALL);   // RIGHT wall
+
+    // Small rest ledges protruding from the walls - each is 90 wide, so the
+    // player has something to land on between wall-jumps.
+    // Left side (protrudes right from the left wall)
+    AddSolid(5020, -2560, 90, 18, SOLID_FLOATING);
+    AddSolid(5020, -2760, 90, 18, SOLID_FLOATING);
+    AddSolid(5020, -2960, 90, 18, SOLID_FLOATING);
+    // Right side (protrudes left from the right wall)
+    AddSolid(5230, -2660, 90, 18, SOLID_FLOATING);
+    AddSolid(5230, -2860, 90, 18, SOLID_FLOATING);
+    AddSolid(5230, -3060, 90, 18, SOLID_FLOATING);
+
+    AddCoin(5065, -2620);
+    AddCoin(5275, -2720);
+    AddCoin(5065, -2820);
+    AddCoin(5275, -2920);
+    AddCoin(5065, -3020);
+    AddCoin(5275, -3120);
+
+    // Top ledge: the summit platform you land on after clearing the walls
+    AddSolid(5050, -3200, 240, 30, SOLID_FLOATING);
+    AddCoin(5170, -3250);
+
+    goalRect = (Rectangle){ 5150, -3270, 40, 70 };
 
     spawnPoint = (Vector2){ 100, 650 - PLAYER_H };
-    worldWidth = 5200.0f;
-    worldTopY = -2600.0f;
+    worldWidth = 5600.0f;
+    worldTopY = -3600.0f;
     worldBottomY = 900.0f;
 }
 
@@ -1400,6 +1518,30 @@ static bool PlayerStandsOnSolid(Player* p, Solid* s)
     if (!horizOverlap) return false;
     float feetY = pr.y + pr.height;
     return fabsf(feetY - r.y) < 4.0f;
+}
+
+// Returns -1 if the player is pressed against a wall on their left, +1 if on
+// their right, 0 if not touching a wall. Only checks solid walls that are
+// currently tangible (skips broken breakables and phased-out platforms).
+static int PlayerWallContact(Player* p)
+{
+    Rectangle pr = PlayerRect(p->position);
+    // A thin probe on each side of the player, one pixel proud of the body.
+    Rectangle leftProbe = { pr.x - 2.0f, pr.y + 4.0f, 2.0f, pr.height - 8.0f };
+    Rectangle rightProbe = { pr.x + pr.width, pr.y + 4.0f, 2.0f, pr.height - 8.0f };
+
+    bool leftWall = false, rightWall = false;
+    for (int i = 0; i < solidCount; i++)
+    {
+        if (!IsSolidActive(&solids[i])) continue;
+        if (solids[i].type != SOLID_WALL) continue;
+        if (CheckCollisionRecs(leftProbe, solids[i].rect)) leftWall = true;
+        if (CheckCollisionRecs(rightProbe, solids[i].rect)) rightWall = true;
+    }
+    if (leftWall && rightWall) return 0;   // in a 1-tile-wide slot, don't fire
+    if (leftWall)  return -1;
+    if (rightWall) return +1;
+    return 0;
 }
 
 static int FindStandingBreakableIndex(Player* p)
@@ -1601,16 +1743,8 @@ static void ResolveSolidOverlap(Player* p)
         else
         {
             p->position.y += pushY;
-            // Only treat this as a landing/ceiling-bump if velocity is what's
-            // driving the overlap. Otherwise a platform that rises into the
-            // player's still-unmoved spot on the exact frame they jump would
-            // zero out the jump velocity we just set, cancelling the jump.
-            bool movingIntoIt = (pushY < 0.0f) ? (p->velocity.y > 0.0f) : (p->velocity.y < 0.0f);
-            if (movingIntoIt)
-            {
-                if (pushY < 0.0f) p->onGround = true;
-                p->velocity.y = 0.0f;
-            }
+            if (pushY < 0.0f) p->onGround = true;
+            p->velocity.y = 0.0f;
         }
         pr = PlayerRect(p->position);
     }
@@ -1660,6 +1794,9 @@ static void RespawnPlayer(Player* p)
     p->usedDoubleJump = false;
     p->usedDash = false;
     p->dashTimer = 0.0f;
+    p->wallJumpLockTimer = 0.0f;
+    p->wallJumpGraceTimer = 0.0f;
+    p->wallContactDir = 0.0f;
     p->scale = (Vector2){ 1.0f, 1.0f };
 }
 
@@ -3562,6 +3699,12 @@ int main(void)
         {
             levelTime += dt;
 
+            // ---- Move platforms FIRST so onGround reflects the platform's
+            //      current position when the player presses jump this frame.
+            //      Otherwise a rising platform can drag the player into itself
+            //      after the jump has already been applied. ----
+            UpdatePlatforms(&player, dt);
+
             float moveDir = 0.0f;
             if (IsKeyDown(KEY_RIGHT) || IsKeyDown(KEY_D)) moveDir += 1.0f;
             if (IsKeyDown(KEY_LEFT) || IsKeyDown(KEY_A)) moveDir -= 1.0f;
@@ -3570,7 +3713,11 @@ int main(void)
             float accel = player.onGround ? GROUND_ACCEL : AIR_ACCEL;
             float friction = player.onGround ? GROUND_FRICTION : AIR_FRICTION;
 
-            if (moveDir != 0.0f)
+            if (player.wallJumpLockTimer > 0.0f)
+            {
+                // Wall-jump lockout: ignore run input, keep the kick's velocity.
+            }
+            else if (moveDir != 0.0f)
             {
                 float vx = player.velocity.x;
                 if (player.grappling)
@@ -3609,15 +3756,67 @@ int main(void)
                 }
             }
 
+            // ---- Coyote time bookkeeping ----
             if (player.onGround) player.coyoteTimer = COYOTE_TIME;
             else player.coyoteTimer -= dt;
 
+            // ---- Jump buffer ----
             if (IsKeyPressed(KEY_SPACE)) player.jumpBufferTimer = JUMP_BUFFER_TIME;
             else player.jumpBufferTimer -= dt;
 
-            bool canGroundJump = (player.onGround || player.coyoteTimer > 0.0f);
-            if (player.jumpBufferTimer > 0.0f && canGroundJump)
+            // ---- Wall contact + wall jump ----
+            if (player.wallJumpLockTimer > 0.0f) player.wallJumpLockTimer -= dt;
+
+            int wallDir = 0;
+            if (!player.onGround && !player.grappling && player.wallJumpLockTimer <= 0.0f)
+                wallDir = PlayerWallContact(&player);
+
+            if (wallDir != 0) player.wallJumpGraceTimer = WALL_JUMP_GRACE;
+            else if (player.wallJumpGraceTimer > 0.0f) player.wallJumpGraceTimer -= dt;
+
+            bool canWallJump = (!player.onGround && wallDir != 0) ||
+                (!player.onGround && player.wallJumpGraceTimer > 0.0f);
+
+            if (IsKeyPressed(KEY_SPACE) && canWallJump && !player.grappling)
             {
+                float kickDir = (wallDir != 0) ? -wallDir : -player.wallContactDir;
+                if (kickDir == 0.0f) kickDir = -player.facing;
+
+                player.velocity.x = kickDir * WALL_JUMP_VX;
+                player.velocity.y = WALL_JUMP_VY;
+                player.facing = kickDir;
+
+                player.wallJumpLockTimer = WALL_JUMP_LOCKOUT;
+                player.wallJumpGraceTimer = 0.0f;
+                player.jumpBufferTimer = 0.0f;
+                player.coyoteTimer = 0.0f;
+
+                player.usedDoubleJump = false;
+                player.usedDash = false;
+
+                player.scale = (Vector2){ 0.7f, 1.35f };
+                Snd(sndJump);
+                Shake(2.0f, 0.06f);
+
+                Vector2 feet = { player.position.x + PLAYER_W * 0.5f,
+                                 player.position.y + PLAYER_H };
+                SpawnBurst(feet, 8, 140.0f, 0.3f, 3.0f, (Color) { 220, 220, 255, 255 });
+            }
+            else
+            {
+                if (wallDir != 0) player.wallContactDir = (float)wallDir;
+            }
+
+            // ---- Ground / double jump ----
+            bool canGroundJump = (player.onGround || player.coyoteTimer > 0.0f);
+            if (player.jumpBufferTimer > 0.0f && canGroundJump && !canWallJump)
+            {
+                // Carry the platform's upward velocity so we don't just cancel
+                // it the moment we leave the surface. On a rising platform
+                // this is what makes the jump actually feel like a jump.
+                float carryY = fminf(0.0f, player.velocity.y);
+                if (player.velocity.y > 0.0f) carryY = player.velocity.y;
+
                 player.velocity.y = JUMP_VELOCITY;
                 player.onGround = false;
                 player.coyoteTimer = 0.0f;
@@ -3628,7 +3827,8 @@ int main(void)
                 Vector2 feet = { player.position.x + PLAYER_W * 0.5f, player.position.y + PLAYER_H };
                 SpawnBurst(feet, 6, 120.0f, 0.3f, 2.5f, (Color) { 210, 200, 170, 220 });
             }
-            else if (IsKeyPressed(KEY_SPACE) && !canGroundJump && !player.grappling && !player.usedDoubleJump)
+            else if (IsKeyPressed(KEY_SPACE) && !canGroundJump && !canWallJump &&
+                !player.grappling && !player.usedDoubleJump)
             {
                 player.velocity.y = DOUBLE_JUMP_VELOCITY;
                 player.usedDoubleJump = true;
@@ -3650,17 +3850,16 @@ int main(void)
                 else TryFireGrapple(&player);
             }
 
-            // ---- Air dash: one burst per airtime, refreshed by grounding or grappling ----
+            // ---- Air dash ----
             if (player.dashTimer > 0.0f) player.dashTimer -= dt;
 
             if ((IsKeyPressed(KEY_LEFT_SHIFT) || IsKeyPressed(KEY_RIGHT_SHIFT)) &&
                 !player.onGround && !player.grappling && !player.usedDash)
             {
                 player.dashDir = (moveDir != 0.0f) ? moveDir : player.facing;
-                // Guarantee at least dash speed; never slow down a faster swing/fall.
                 player.dashSpeed = fmaxf(fabsf(player.velocity.x), DASH_SPEED);
                 player.velocity.x = player.dashDir * player.dashSpeed;
-                player.velocity.y *= 0.2f; // flatten the arc into a burst
+                player.velocity.y *= 0.2f;
                 player.dashTimer = DASH_DURATION;
                 player.usedDash = true;
                 player.scale = (Vector2){ 1.5f, 0.6f };
@@ -3670,8 +3869,6 @@ int main(void)
             }
             else if (player.dashTimer > 0.0f)
             {
-                // Hold the burst speed for the rest of its duration, overriding
-                // whatever the run/air accel above did this frame.
                 player.velocity.x = player.dashDir * player.dashSpeed;
             }
 
@@ -3679,7 +3876,6 @@ int main(void)
             player.velocity.y += GRAVITY * gravityMult * dt;
             if (!player.grappling) player.velocity.y = fminf(player.velocity.y, MAX_FALL_SPEED);
 
-            UpdatePlatforms(&player, dt);
             ResolveSolidOverlap(&player);
 
             MoveAndCollide(&player, dt);
@@ -3851,11 +4047,11 @@ int main(void)
         DrawSpeedVignette(speedIntensity);
 
         DrawRectangle(0, 0, SCREEN_W, 84, Fade(BLACK, 0.35f));
-        DrawText("A/D or Arrows: run   SPACE: jump (double-jump in air!)   SHIFT: air dash   F / Click: grapple",
+        DrawText("A/D or Arrows: run   SPACE: jump / wall-jump (double-jump in air!)   SHIFT: air dash   F / Click: grapple",
             16, 8, 18, RAYWHITE);
         DrawText("While grappling -> W/S or Up/Down: reel in/out    R: restart    ESC: level select",
             16, 32, 18, RAYWHITE);
-        DrawText("Hit a wall hard enough and you'll bounce off it",
+        DrawText("Jump against a wall to wall-jump off it",
             16, 56, 16, (Color) { 220, 220, 220, 255 });
 
         char hud[128];
